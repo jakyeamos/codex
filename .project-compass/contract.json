@@ -1,0 +1,110 @@
+{
+  "schema_version": 1,
+  "revision": 1,
+  "project": {
+    "name": "codex",
+    "identity": "The OpenAI Codex CLI: a local coding agent that inspects repositories, edits files, and runs development checks through a terminal-oriented workflow.",
+    "audience": "Developers and maintainers using a local coding-agent CLI with explicit repository and execution boundaries.",
+    "core_loop": "Invoke the agent, inspect repository context, make a bounded change, run checks, and review the resulting evidence.",
+    "north_star": "A developer can use the local CLI to make attributable repository changes with clear verification and ownership boundaries.",
+    "not_this": [
+      "The Codex Web or ChatGPT product surface",
+      "A claim that this checkout is a released provider artifact",
+      "Proof of provider-native execution from source inspection alone"
+    ]
+  },
+  "targets": {
+    "mvp": {
+      "definition": "The CLI can be built or run locally with documented repository-facing behavior and a reviewable change loop."
+    },
+    "complete_product": {
+      "definition": "The CLI provides a stable local coding-agent workflow with tested command behavior, distribution evidence, and clear provider/runtime boundaries."
+    }
+  },
+  "pillars": [
+    {
+      "id": "local-agent-loop",
+      "name": "Local agent loop",
+      "outcomes": [
+        {
+          "id": "inspect-edit-test",
+          "name": "The local CLI supports an inspect, edit, and test loop that is understandable to repository users.",
+          "targets": ["mvp", "complete_product"],
+          "maturity": 25,
+          "confidence": "medium",
+          "layers": {
+            "intended": "Codex is intended to help developers work through local repository changes.",
+            "planned": "Repository guidance and the Rust CLI layout describe the local coding-agent surface.",
+            "implemented": "README.md, AGENTS.md, and codex-rs/README.md document the CLI and its repository context.",
+            "verified": "This contract is grounded in source and documentation; a fresh end-user CLI smoke is not recorded here."
+          },
+          "evidence": [
+            {"ref": "README.md", "note": "CLI purpose and user-facing entry point.", "observed_at": "2026-08-08T22:01:35Z"},
+            {"ref": "AGENTS.md", "note": "Repository and agent operating guidance.", "observed_at": "2026-08-08T22:01:35Z"},
+            {"ref": "codex-rs/README.md", "note": "Rust CLI implementation context.", "observed_at": "2026-08-08T22:01:35Z"}
+          ],
+          "blockers": [
+            {"kind": "verification", "summary": "A fresh forward-facing CLI smoke and distribution readback are not recorded in this bootstrap contract."}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "release-boundary",
+      "name": "Release and provider boundary",
+      "outcomes": [
+        {
+          "id": "truthful-distribution-state",
+          "name": "Local source, branch state, and provider ownership are kept distinct from released or provider-native claims.",
+          "targets": ["complete_product"],
+          "maturity": 0,
+          "confidence": "low",
+          "layers": {
+            "intended": "The project should make local, released, and provider-native states distinguishable.",
+            "planned": "Repository instructions and branch policy preserve release/default lines separately from development work.",
+            "implemented": "The current checkout provides source and documentation but remains materially dirty and is not a release receipt.",
+            "verified": "The local dev branch was created from live origin/main, but pushing origin/dev was denied by GitHub ownership."
+          },
+          "evidence": [
+            {"ref": "AGENTS.md", "note": "Repository operating and branch-boundary guidance.", "observed_at": "2026-08-08T22:01:35Z"}
+          ],
+          "blockers": [
+            {"kind": "external", "summary": "The current credentials cannot create origin/dev on openai/codex.git; remote branch ownership remains unresolved."},
+            {"kind": "verification", "summary": "The dirty local checkout is not release evidence."}
+          ]
+        }
+      ]
+    }
+  ],
+  "source_layers": {
+    "intended": [
+      {"ref": "README.md", "note": "Declared local coding-agent purpose.", "observed_at": "2026-08-08T22:01:35Z"}
+    ],
+    "planned": [
+      {"ref": "AGENTS.md", "note": "Repository workflow and boundary guidance.", "observed_at": "2026-08-08T22:01:35Z"}
+    ],
+    "implemented": [
+      {"ref": "codex-rs/README.md", "note": "Rust CLI implementation surface.", "observed_at": "2026-08-08T22:01:35Z"}
+    ],
+    "verified": []
+  },
+  "drift": [
+    {
+      "kind": "verification-gap",
+      "summary": "The repository documents a local CLI, but current end-user behavior and release distribution are not proven by this contract.",
+      "status": "open",
+      "observed_at": "2026-08-08T22:01:35Z",
+      "evidence": [
+        {"ref": "README.md", "note": "Documentation establishes intent but not current release behavior.", "observed_at": "2026-08-08T22:01:35Z"}
+      ]
+    },
+    {
+      "kind": "conflict",
+      "summary": "The intended development branch cannot currently be published to the upstream repository with the available credentials.",
+      "status": "open",
+      "observed_at": "2026-08-08T22:01:35Z",
+      "evidence": []
+    }
+  ],
+  "updated_at": "2026-08-08T22:01:35Z"
+}
