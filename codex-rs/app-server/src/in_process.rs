@@ -63,6 +63,9 @@ use crate::outgoing_message::OutgoingEnvelope;
 use crate::outgoing_message::OutgoingMessage;
 use crate::outgoing_message::OutgoingMessageSender;
 use crate::outgoing_message::QueuedOutgoingMessage;
+use crate::thread_setup_bridge::ThreadSetupBridge;
+use crate::thread_setup_status::ThreadSetupStatusHandle;
+use crate::thread_setup_status::ThreadSetupStatusRegistry;
 use crate::transport::CHANNEL_CAPACITY;
 use crate::transport::OutboundConnectionState;
 use crate::transport::route_outgoing_envelope;
@@ -264,6 +267,7 @@ pub struct InProcessClientHandle {
     client: InProcessClientSender,
     event_rx: mpsc::Receiver<InProcessServerEvent>,
     runtime_handle: tokio::task::JoinHandle<()>,
+    thread_setup_status: ThreadSetupStatusHandle,
     #[cfg(test)]
     _test_codex_home: Option<tempfile::TempDir>,
 }
@@ -345,6 +349,19 @@ impl InProcessClientHandle {
     pub fn sender(&self) -> InProcessClientSender {
         self.client.clone()
     }
+
+    /// Returns the connection-scoped host handle for asynchronous thread setup.
+    pub fn thread_setup_status(&self) -> ThreadSetupStatusHandle {
+        self.thread_setup_status.clone()
+    }
+
+    /// Returns the supported host bridge for asynchronous thread setup.
+    ///
+    /// Embedders should use this adapter for pending/ready/failed lifecycle
+    /// publication and pair it with the `thread/setupStatus/read` request.
+    pub fn thread_setup_bridge(&self) -> ThreadSetupBridge {
+        self.thread_setup_status.clone().into()
+    }
 }
 
 /// Starts an in-process app-server runtime and performs initialize handshake.
@@ -405,6 +422,9 @@ async fn run_outbound_router(
 async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClientHandle> {
     let channel_capacity = args.channel_capacity.max(1);
     let installation_id = resolve_installation_id(&args.config.codex_home).await?;
+    let thread_setup_status_registry = ThreadSetupStatusRegistry::new();
+    let thread_setup_status_handle =
+        thread_setup_status_registry.handle_for(IN_PROCESS_CONNECTION_ID);
     let (client_tx, mut client_rx) = mpsc::channel::<InProcessClientMessage>(channel_capacity);
     let (event_tx, event_rx) = mpsc::channel::<InProcessServerEvent>(channel_capacity);
 
@@ -474,6 +494,7 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
                 rpc_transport: AppServerRpcTransport::InProcess,
                 remote_control_handle: None,
                 plugin_startup_tasks: crate::PluginStartupTasks::Start,
+                thread_setup_status: thread_setup_status_registry,
             }));
             let mut thread_created_rx = processor.thread_created_receiver();
             let session = Arc::new(ConnectionSessionState::new());
@@ -766,6 +787,7 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
         client: InProcessClientSender { client_tx },
         event_rx,
         runtime_handle,
+        thread_setup_status: thread_setup_status_handle,
         #[cfg(test)]
         _test_codex_home: None,
     })
@@ -778,6 +800,8 @@ mod tests {
     use codex_app_server_protocol::ConfigRequirementsReadResponse;
     use codex_app_server_protocol::ExternalAgentConfigImportCompletedNotification;
     use codex_app_server_protocol::SessionSource as ApiSessionSource;
+    use codex_app_server_protocol::ThreadSetupStatus;
+    use codex_app_server_protocol::ThreadSetupStatusReadParams;
     use codex_app_server_protocol::ThreadStartParams;
     use codex_app_server_protocol::ThreadStartResponse;
     use codex_app_server_protocol::Turn;
@@ -863,6 +887,61 @@ mod tests {
 
         let _parsed: ConfigRequirementsReadResponse =
             serde_json::from_value(response).expect("response should match v2 schema");
+        client
+            .shutdown()
+            .await
+            .expect("in-process runtime should shutdown cleanly");
+    }
+
+    #[tokio::test]
+    async fn thread_setup_status_round_trip_does_not_use_thread_list() {
+        let client = start_test_client(SessionSource::Cli).await;
+        let setup = client.thread_setup_bridge();
+        setup
+            .register_pending("client-thread-in-process")
+            .expect("setup handle should register");
+
+        let pending = client
+            .request(ClientRequest::ThreadSetupStatusRead {
+                request_id: RequestId::Integer(10),
+                params: ThreadSetupStatusReadParams {
+                    client_thread_id: "client-thread-in-process".to_string(),
+                },
+            })
+            .await
+            .expect("status transport should work")
+            .expect("pending status should succeed");
+        assert_eq!(
+            serde_json::from_value::<ThreadSetupStatus>(pending)
+                .expect("pending status should parse"),
+            ThreadSetupStatus::Pending
+        );
+
+        setup
+            .mark_ready(
+                "client-thread-in-process",
+                "thread-in-process",
+                "host-in-process",
+            )
+            .expect("setup handle should complete");
+        let ready = client
+            .request(ClientRequest::ThreadSetupStatusRead {
+                request_id: RequestId::Integer(11),
+                params: ThreadSetupStatusReadParams {
+                    client_thread_id: "client-thread-in-process".to_string(),
+                },
+            })
+            .await
+            .expect("status transport should work")
+            .expect("ready status should succeed");
+        assert_eq!(
+            serde_json::from_value::<ThreadSetupStatus>(ready).expect("ready status should parse"),
+            ThreadSetupStatus::Ready {
+                thread_id: "thread-in-process".to_string(),
+                host_id: "host-in-process".to_string(),
+            }
+        );
+
         client
             .shutdown()
             .await
@@ -967,6 +1046,8 @@ mod tests {
             client: InProcessClientSender { client_tx },
             event_rx,
             runtime_handle,
+            thread_setup_status: ThreadSetupStatusRegistry::new()
+                .handle_for(IN_PROCESS_CONNECTION_ID),
             _test_codex_home: None,
         };
 
