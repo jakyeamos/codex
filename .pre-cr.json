@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "coveragePaths": [
+    "coverage/lcov.info"
+  ],
+  "coverageFormat": "auto",
+  "threshold": 80,
+  "surfaces": {
+    "covered": [
+      "codex-rs/**"
+    ],
+    "ignored": [
+      "codex-rs/app-server-protocol/schema/**",
+      ".pre-cr.json"
+    ],
+    "unsupported": []
+  },
+  "checks": {
+    "coverage": true,
+    "security": true,
+    "checklist": true
+  },
+  "hook": {
+    "rules": {
+      "pre-cr-failed": "off",
+      "oversized-source": "off"
+    }
+  }
+}
