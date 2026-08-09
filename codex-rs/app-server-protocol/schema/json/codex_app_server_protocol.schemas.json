@@ -259,6 +259,30 @@
             },
             "method": {
               "enum": [
+                "thread/setupStatus/read"
+              ],
+              "title": "Thread/setupStatus/readRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/ThreadSetupStatusReadParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Thread/setupStatus/readRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
                 "thread/resume"
               ],
               "title": "Thread/resumeRequestMethod",
@@ -21004,6 +21028,95 @@
           "threadSettings"
         ],
         "title": "ThreadSettingsUpdatedNotification",
+        "type": "object"
+      },
+      "ThreadSetupFailureCode": {
+        "description": "Failure categories exposed by asynchronous thread setup.\n\nThese values intentionally avoid carrying provider errors, paths, prompts, tool data, or other setup details across the client boundary.",
+        "enum": [
+          "setupFailed",
+          "cancelled",
+          "timedOut"
+        ],
+        "type": "string"
+      },
+      "ThreadSetupStatus": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "description": "A sanitized asynchronous thread setup status.",
+        "oneOf": [
+          {
+            "description": "Setup has started but has not reached a terminal state.",
+            "properties": {
+              "status": {
+                "enum": [
+                  "pending"
+                ],
+                "title": "Pendingv2::ThreadSetupStatusStatus",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "title": "Pendingv2::ThreadSetupStatus",
+            "type": "object"
+          },
+          {
+            "description": "Setup completed and resolved the canonical thread and host identities.",
+            "properties": {
+              "hostId": {
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "ready"
+                ],
+                "type": "string"
+              },
+              "threadId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "hostId",
+              "status",
+              "threadId"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Setup stopped without exposing its internal failure details.",
+            "properties": {
+              "code": {
+                "$ref": "#/definitions/v2/ThreadSetupFailureCode"
+              },
+              "status": {
+                "enum": [
+                  "failed"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "status"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "ThreadSetupStatus"
+      },
+      "ThreadSetupStatusReadParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "description": "Parameters for reading one connection-scoped asynchronous thread setup handle.",
+        "properties": {
+          "clientThreadId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "clientThreadId"
+        ],
+        "title": "ThreadSetupStatusReadParams",
         "type": "object"
       },
       "ThreadShellCommandParams": {
