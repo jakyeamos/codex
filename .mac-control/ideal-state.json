@@ -1,0 +1,7 @@
+{
+  "schema": "mac-control-task-manifest/v1",
+  "repository_id": "repo-c0c4640df0efbd96",
+  "repository_name": "codex",
+  "applicability": "not_applicable",
+  "applicability_reason": "No repository-owned macOS application or Mac Control-specific task surface is present; this repository exposes browser, service, library, data, CLI, or test-fixture behavior covered by its direct interface."
+}
