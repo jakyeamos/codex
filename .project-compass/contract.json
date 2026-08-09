@@ -62,14 +62,13 @@
           "layers": {
             "intended": "The project should make local, released, and provider-native states distinguishable.",
             "planned": "Repository instructions and branch policy preserve release/default lines separately from development work.",
-            "implemented": "The current checkout provides source and documentation but remains materially dirty and is not a release receipt.",
-            "verified": "The local dev branch was created from live origin/main, but pushing origin/dev was denied by GitHub ownership."
+            "implemented": "The fork checkout provides source and documentation; active local worktrees remain distinct from the canonical development target and neither is a release receipt.",
+            "verified": "The user-owned fork jakyeamos/codex is the canonical provider target and exposes live main and dev branches; upstream openai/codex remains a separate source repository."
           },
           "evidence": [
             {"ref": "AGENTS.md", "note": "Repository operating and branch-boundary guidance.", "observed_at": "2026-08-08T22:01:35Z"}
           ],
           "blockers": [
-            {"kind": "external", "summary": "The current credentials cannot create origin/dev on openai/codex.git; remote branch ownership remains unresolved."},
             {"kind": "verification", "summary": "The dirty local checkout is not release evidence."}
           ]
         }
@@ -99,12 +98,12 @@
       ]
     },
     {
-      "kind": "conflict",
-      "summary": "The intended development branch cannot currently be published to the upstream repository with the available credentials.",
-      "status": "open",
-      "observed_at": "2026-08-08T22:01:35Z",
+      "kind": "provider-boundary",
+      "summary": "The user-owned fork is canonical for this repository; upstream openai/codex is retained as a separate source and is not the fleet publication target.",
+      "status": "recorded",
+      "observed_at": "2026-08-09T17:27:22Z",
       "evidence": []
     }
   ],
-  "updated_at": "2026-08-08T22:01:35Z"
+  "updated_at": "2026-08-09T17:27:22Z"
 }
