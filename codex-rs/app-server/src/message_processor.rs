@@ -45,6 +45,7 @@ use crate::request_serialization::QueuedInitializedRequest;
 use crate::request_serialization::RequestSerializationQueueKey;
 use crate::request_serialization::RequestSerializationQueues;
 use crate::skills_watcher::SkillsWatcher;
+use crate::thread_setup_status::ThreadSetupStatusRegistry;
 use crate::thread_state::ConnectionCapabilities;
 use crate::thread_state::ThreadStateManager;
 use crate::transport::AppServerTransport;
@@ -124,6 +125,7 @@ pub(crate) struct MessageProcessor {
     thread_processor: ThreadRequestProcessor,
     turn_processor: TurnRequestProcessor,
     windows_sandbox_processor: WindowsSandboxRequestProcessor,
+    thread_setup_status: ThreadSetupStatusRegistry,
     request_serialization_queues: RequestSerializationQueues,
 }
 
@@ -221,6 +223,7 @@ pub(crate) struct MessageProcessorArgs {
     pub(crate) rpc_transport: AppServerRpcTransport,
     pub(crate) remote_control_handle: Option<RemoteControlHandle>,
     pub(crate) plugin_startup_tasks: crate::PluginStartupTasks,
+    pub(crate) thread_setup_status: ThreadSetupStatusRegistry,
 }
 
 impl MessageProcessor {
@@ -245,6 +248,7 @@ impl MessageProcessor {
             rpc_transport,
             remote_control_handle,
             plugin_startup_tasks,
+            thread_setup_status,
         } = args;
         let thread_state_manager = ThreadStateManager::new();
         // The thread store is intentionally process-scoped. Config reloads can
@@ -525,6 +529,7 @@ impl MessageProcessor {
             thread_processor,
             turn_processor,
             windows_sandbox_processor,
+            thread_setup_status,
             request_serialization_queues,
         }
     }
@@ -751,6 +756,7 @@ impl MessageProcessor {
         self.process_exec_processor
             .connection_closed(connection_id)
             .await;
+        self.thread_setup_status.connection_closed(connection_id);
         self.thread_processor.connection_closed(connection_id).await;
     }
 
@@ -983,7 +989,7 @@ impl MessageProcessor {
                 .clients_revoke(params)
                 .await
                 .map(|response| Some(response.into())),
-            ClientRequest::ConfigRequirementsRead { params: _, .. } => self
+            ClientRequest::ConfigRequirementsRead { .. } => self
                 .config_processor
                 .config_requirements_read()
                 .await
@@ -1042,7 +1048,7 @@ impl MessageProcessor {
                 .unwatch(connection_id, params)
                 .await
                 .map(|response| Some(response.into())),
-            ClientRequest::ModelProviderCapabilitiesRead { params: _, .. } => self
+            ClientRequest::ModelProviderCapabilitiesRead { .. } => self
                 .config_processor
                 .model_provider_capabilities_read()
                 .await
@@ -1059,6 +1065,12 @@ impl MessageProcessor {
                     )
                     .await
             }
+            ClientRequest::ThreadSetupStatusRead { params, .. } => self
+                .thread_setup_status
+                .handle_for(connection_id)
+                .get_thread_setup_status(&params.client_thread_id)
+                .map(|response| Some(response.into()))
+                .map_err(|_| invalid_request("Unknown thread setup handle")),
             ClientRequest::ThreadUnsubscribe { params, .. } => {
                 self.thread_processor
                     .thread_unsubscribe(&request_id, params)
@@ -1350,7 +1362,7 @@ impl MessageProcessor {
                     .thread_realtime_stop(&request_id, params)
                     .await
             }
-            ClientRequest::ThreadRealtimeListVoices { params: _, .. } => {
+            ClientRequest::ThreadRealtimeListVoices { .. } => {
                 self.turn_processor.thread_realtime_list_voices().await
             }
             ClientRequest::ReviewStart { params, .. } => {
