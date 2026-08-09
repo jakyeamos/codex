@@ -495,6 +495,11 @@ client_request_definitions! {
         serialization: None,
         response: v2::ThreadStartResponse,
     },
+    ThreadSetupStatusRead => "thread/setupStatus/read" {
+        params: v2::ThreadSetupStatusReadParams,
+        serialization: None,
+        response: v2::ThreadSetupStatus,
+    },
     ThreadResume => "thread/resume" {
         params: v2::ThreadResumeParams,
         inspect_params: true,
