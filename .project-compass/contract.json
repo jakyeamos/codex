@@ -98,9 +98,9 @@
       ]
     },
     {
-      "kind": "provider-boundary",
+      "kind": "intent-change",
       "summary": "The user-owned fork is canonical for this repository; upstream openai/codex is retained as a separate source and is not the fleet publication target.",
-      "status": "recorded",
+      "status": "accepted",
       "observed_at": "2026-08-09T17:27:22Z",
       "evidence": []
     }
