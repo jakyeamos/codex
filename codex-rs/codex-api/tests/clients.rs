@@ -10,6 +10,10 @@ use codex_api::AuthError;
 use codex_api::AuthProvider;
 use codex_api::Compression;
 use codex_api::Provider;
+use codex_api::ProviderRequestTokenAttributor;
+use codex_api::ProviderTerminalAttributionReceipt;
+use codex_api::ProviderTerminalInputItem;
+use codex_api::ProviderTerminalResponse;
 use codex_api::ResponsesApiRequest;
 use codex_api::ResponsesClient;
 use codex_api::ResponsesOptions;
@@ -24,6 +28,7 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
+use futures::StreamExt;
 use http::HeaderMap;
 use http::HeaderValue;
 use http::StatusCode;
@@ -76,11 +81,72 @@ impl RecordingState {
 #[derive(Clone)]
 struct RecordingTransport {
     state: RecordingState,
+    stream_body: Bytes,
+}
+
+#[derive(Clone, Default)]
+struct ExactAttributor {
+    final_bodies: Arc<Mutex<Vec<Vec<u8>>>>,
+}
+
+impl ProviderRequestTokenAttributor for ExactAttributor {
+    fn terminal_attribution(
+        &self,
+        request: &ResponsesApiRequest,
+        final_body: &[u8],
+        terminal: &ProviderTerminalResponse,
+    ) -> std::result::Result<
+        ProviderTerminalAttributionReceipt,
+        codex_api::ProviderRequestAttributionError,
+    > {
+        self.final_bodies
+            .lock()
+            .expect("attributor mutex should not be poisoned")
+            .push(final_body.to_vec());
+        assert_eq!(terminal.response_id, "resp-exact");
+        assert_eq!(terminal.authoritative_input_tokens, Some(41));
+        let item_id = request.input[0]
+            .id()
+            .expect("exact test input should have an id")
+            .to_string();
+        Ok(ProviderTerminalAttributionReceipt {
+            session_id: terminal
+                .session_id
+                .clone()
+                .expect("session id should be bound"),
+            turn_id: terminal.turn_id.clone().expect("turn id should be bound"),
+            response_id: terminal.response_id.clone(),
+            request_fingerprint: codex_api::provider_request_fingerprint(final_body),
+            requested_model: terminal.requested_model.clone(),
+            resolved_model: "gpt-test".to_string(),
+            requested_model_fingerprint: codex_api::provider_model_fingerprint(
+                &terminal.requested_model,
+            ),
+            resolved_model_fingerprint: codex_api::provider_model_fingerprint("gpt-test"),
+            provider_transformation_version: "provider-transform-v1".to_string(),
+            tokenizer_accounting_version: "tokenizer-accounting-v1".to_string(),
+            input_items: vec![ProviderTerminalInputItem {
+                item_id,
+                input_tokens: 41,
+            }],
+            authoritative_input_tokens: 41,
+        })
+    }
 }
 
 impl RecordingTransport {
     fn new(state: RecordingState) -> Self {
-        Self { state }
+        Self {
+            state,
+            stream_body: Bytes::new(),
+        }
+    }
+
+    fn with_stream_body(state: RecordingState, stream_body: impl Into<Bytes>) -> Self {
+        Self {
+            state,
+            stream_body: stream_body.into(),
+        }
     }
 }
 
@@ -92,7 +158,11 @@ impl HttpTransport for RecordingTransport {
     async fn stream(&self, req: Request) -> Result<StreamResponse, TransportError> {
         self.state.record(req);
 
-        let stream = futures::stream::iter(Vec::<Result<Bytes, TransportError>>::new());
+        let stream = futures::stream::iter(if self.stream_body.is_empty() {
+            Vec::new()
+        } else {
+            vec![Ok(self.stream_body.clone())]
+        });
         Ok(StreamResponse {
             status: StatusCode::OK,
             headers: HeaderMap::new(),
@@ -357,6 +427,143 @@ async fn responses_client_stream_request_preserves_item_ids() -> Result<()> {
 }
 
 #[tokio::test]
+async fn exact_attribution_is_bound_to_the_captured_final_provider_request() -> Result<()> {
+    let state = RecordingState::default();
+    let transport = RecordingTransport::with_stream_body(
+        state.clone(),
+        Bytes::from_static(
+            br#"event: response.completed
+data: {"type":"response.completed","response":{"id":"resp-exact","usage":{"input_tokens":41,"input_tokens_details":null,"output_tokens":1,"output_tokens_details":null,"total_tokens":42}}}
+
+"#,
+        ),
+    );
+    let attributor = ExactAttributor::default();
+    let client = ResponsesClient::new(transport, provider("openai"), Arc::new(NoAuth))
+        .with_provider_request_token_attributor(Arc::new(attributor.clone()));
+    let request = ResponsesApiRequest {
+        model: "gpt-test".into(),
+        instructions: "Say hi".into(),
+        input: vec![ResponseItem::Message {
+            id: Some(ResponseItemId::with_suffix("msg", "exact")),
+            role: "user".into(),
+            content: vec![ContentItem::InputText { text: "hi".into() }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }],
+        tools: None,
+        tool_choice: "auto".into(),
+        parallel_tool_calls: false,
+        reasoning: None,
+        store: false,
+        stream: true,
+        stream_options: None,
+        include: Vec::new(),
+        service_tier: None,
+        prompt_cache_key: None,
+        text: None,
+        client_metadata: None,
+    };
+    let expected_body = serde_json::to_vec(&request)?;
+
+    let (mut stream, attribution) = client
+        .stream_request_with_attribution(
+            request,
+            ResponsesOptions {
+                session_id: Some("session".into()),
+                turn_id: Some("turn".into()),
+                ..Default::default()
+            },
+        )
+        .await?;
+    while let Some(event) = stream.next().await {
+        event?;
+    }
+
+    let resolved = attribution
+        .resolve()
+        .expect("terminal provider receipt should resolve");
+    assert_eq!(resolved.receipt.authoritative_input_tokens, 41);
+    assert_eq!(resolved.receipt.input_items[0].input_tokens, 41);
+    assert_eq!(resolved.receipt.response_id, "resp-exact");
+    let requests = state.take_stream_requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(request_body_bytes(&requests[0]), expected_body.as_slice());
+    assert_eq!(
+        attributor
+            .final_bodies
+            .lock()
+            .expect("attributor mutex should not be poisoned")
+            .as_slice(),
+        &[expected_body]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn aggregate_only_provider_surface_stays_unavailable() -> Result<()> {
+    let state = RecordingState::default();
+    let transport = RecordingTransport::with_stream_body(
+        state,
+        Bytes::from_static(
+            br#"event: response.completed
+data: {"type":"response.completed","response":{"id":"resp-aggregate","usage":{"input_tokens":23,"input_tokens_details":null,"output_tokens":1,"output_tokens_details":null,"total_tokens":24}}}
+
+"#,
+        ),
+    );
+    let client = ResponsesClient::new(transport, provider("openai"), Arc::new(NoAuth));
+    let request = ResponsesApiRequest {
+        model: "gpt-test".into(),
+        instructions: String::new(),
+        input: vec![ResponseItem::Message {
+            id: Some(ResponseItemId::with_suffix("msg", "aggregate")),
+            role: "user".into(),
+            content: vec![ContentItem::InputText {
+                text: "aggregate only".into(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }],
+        tools: None,
+        tool_choice: "auto".into(),
+        parallel_tool_calls: false,
+        reasoning: None,
+        store: false,
+        stream: true,
+        stream_options: None,
+        include: Vec::new(),
+        service_tier: None,
+        prompt_cache_key: None,
+        text: None,
+        client_metadata: None,
+    };
+    let (mut stream, attribution) = client
+        .stream_request_with_attribution(
+            request,
+            ResponsesOptions {
+                session_id: Some("session".into()),
+                turn_id: Some("turn".into()),
+                ..Default::default()
+            },
+        )
+        .await?;
+    while let Some(event) = stream.next().await {
+        event?;
+    }
+
+    assert_eq!(
+        attribution
+            .resolve()
+            .expect_err("aggregate-only usage is not an exact receipt"),
+        codex_api::ProviderRequestAttributionError::ProviderDoesNotExposeExactPerItemTokens {
+            provider: "openai".to_string(),
+        }
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn streaming_client_adds_auth_headers() -> Result<()> {
     let state = RecordingState::default();
     let transport = RecordingTransport::new(state.clone());
@@ -550,6 +757,7 @@ async fn azure_store_sends_ids_and_headers() -> Result<()> {
             ResponsesOptions {
                 session_id: Some("sess_123".into()),
                 thread_id: Some("thread_123".into()),
+                turn_id: Some("turn_123".into()),
                 session_source: Some(SessionSource::SubAgent(SubAgentSource::Review)),
                 extra_headers,
                 compression: Compression::None,
