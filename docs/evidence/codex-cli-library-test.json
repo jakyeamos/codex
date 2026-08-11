@@ -1,0 +1,18 @@
+{
+  "schema": "repository-behavior-evidence/v1",
+  "tool": "codex-cli",
+  "status": "passed",
+  "observed_at": "2026-08-11",
+  "working_directory": "codex-rs",
+  "commands": [
+    {
+      "command": "cargo test -p codex-cli --lib",
+      "result": "passed",
+      "detail": "17 tests passed; 0 failed; 0 ignored"
+    }
+  ],
+  "summary": "The Codex CLI library test target compiles and passes after routing prefix-rule access through the existing step_context.turn contract on both execution contexts.",
+  "notes": [
+    "The successful run includes the compiler-directed fix for stale direct turn-field access in UnifiedExecContext and ToolCtx."
+  ]
+}
