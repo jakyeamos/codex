@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
+use chrono::Utc;
 use codex_analytics::InvocationType;
 use codex_analytics::SkillInvocation;
 use codex_analytics::TrackEventsContext;
@@ -9,10 +10,14 @@ use codex_extension_api::SkillInvocationInput;
 use codex_extension_api::SkillInvocationKind;
 use codex_otel::sanitize_metric_tag_value;
 use codex_protocol::protocol::SkillScope;
+use codex_rollout::state_db::SkillInvocationRecord;
+use codex_rollout::state_db::SkillInvocationStatus;
+use codex_rollout::state_db::SkillInvocationType as PersistedInvocationType;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_plugins::PluginSkillRoot;
 use std::collections::HashSet;
 use tokio::sync::Mutex;
+use tracing::warn;
 
 pub use codex_skills::SkillError;
 pub use codex_skills::SkillMetadata;
@@ -40,7 +45,7 @@ pub(crate) fn skills_load_input_from_config(
     )
 }
 
-pub(crate) fn emit_explicit_skill_invocations(
+pub(crate) async fn emit_explicit_skill_invocations(
     sess: &Session,
     turn_context: &TurnContext,
     mentioned_skills: &[SkillMetadata],
@@ -51,6 +56,8 @@ pub(crate) fn emit_explicit_skill_invocations(
         .iter()
         .map(|skill| &skill.path_to_skills_md)
         .collect::<HashSet<_>>();
+    let occurred_at_ms = Utc::now().timestamp_millis();
+    let mut persisted_invocations = Vec::with_capacity(mentioned_skills.len());
     for skill in mentioned_skills {
         let skill_name_tag = sanitize_metric_tag_value(skill.name.as_str());
         let status = if injected_skill_paths.contains(&skill.path_to_skills_md) {
@@ -67,6 +74,42 @@ pub(crate) fn emit_explicit_skill_invocations(
                 ("invoke_type", "explicit"),
             ],
         );
+        persisted_invocations.push(SkillInvocationRecord {
+            thread_id: sess.thread_id,
+            turn_id: turn_context.sub_id.clone(),
+            skill_name: skill.name.clone(),
+            skill_path: skill.path_to_skills_md.to_path_buf(),
+            skill_scope: skill.scope,
+            invocation_type: PersistedInvocationType::Explicit,
+            status: if status == "ok" {
+                SkillInvocationStatus::Ok
+            } else {
+                SkillInvocationStatus::Error
+            },
+            occurred_at_ms,
+        });
+    }
+    if let Some(state_db) = sess.state_db()
+        && let Err(err) = state_db
+            .record_skill_invocations(&persisted_invocations)
+            .await
+    {
+        warn!("failed to persist explicit skill invocation events: {err}");
+    }
+
+    for skill in injected_skills {
+        for contributor in sess.services.extensions.skill_invocation_contributors() {
+            contributor
+                .on_skill_invocation(SkillInvocationInput {
+                    session_store: &sess.services.session_extension_data,
+                    thread_store: &sess.services.thread_extension_data,
+                    turn_store: turn_context.extension_data.as_ref(),
+                    turn_id: turn_context.sub_id.as_str(),
+                    skill_resource: skill.path_to_skills_md.to_string_lossy().as_ref(),
+                    kind: SkillInvocationKind::Explicit,
+                })
+                .await;
+        }
     }
 
     let invocations = injected_skills
@@ -126,6 +169,23 @@ pub(crate) async fn maybe_emit_implicit_skill_invocation(
         return;
     }
     let skill_name_tag = sanitize_metric_tag_value(skill_name.as_str());
+
+    if let Some(state_db) = sess.state_db()
+        && let Err(err) = state_db
+            .record_skill_invocations(&[SkillInvocationRecord {
+                thread_id: sess.thread_id,
+                turn_id: turn_context.sub_id.clone(),
+                skill_name: skill_name.clone(),
+                skill_path: invocation.skill_path.clone(),
+                skill_scope: invocation.skill_scope,
+                invocation_type: PersistedInvocationType::Implicit,
+                status: SkillInvocationStatus::Ok,
+                occurred_at_ms: Utc::now().timestamp_millis(),
+            }])
+            .await
+    {
+        warn!("failed to persist implicit skill invocation event: {err}");
+    }
 
     for contributor in sess.services.extensions.skill_invocation_contributors() {
         contributor
