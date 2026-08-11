@@ -152,7 +152,8 @@ impl ModelContextScan {
             RolloutItem::EventMsg(_)
             | RolloutItem::SessionMeta(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
-            | RolloutItem::WorldState(_) => {}
+            | RolloutItem::WorldState(_)
+            | RolloutItem::HostObservation(_) => {}
         }
 
         if self.has_bounded_cutoff() {

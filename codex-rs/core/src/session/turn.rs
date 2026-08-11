@@ -41,6 +41,8 @@ use crate::responses_retry::handle_retryable_response_stream_error;
 use crate::session::PreviousTurnSettings;
 use crate::session::TurnInput;
 use crate::session::session::Session;
+use crate::session::skill_telemetry::SkillReadProvenance;
+use crate::session::skill_telemetry::SkillReadTelemetry;
 use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnContext;
 use crate::stream_events_utils::HandleOutputCtx;
@@ -73,6 +75,7 @@ use codex_analytics::build_track_events_context;
 use codex_async_utils::OrCancelExt;
 use codex_core_plugins::RecommendedPluginCandidatesInput;
 use codex_core_skills::injection::InjectedHostSkillPrompts;
+use codex_core_skills::injection::SkillInjection;
 use codex_extension_api::ExtensionData;
 use codex_extension_api::TurnInputContext;
 use codex_extension_api::TurnInputEnvironment;
@@ -242,9 +245,19 @@ pub(crate) async fn run_turn(
         realtime_active: Some(turn_context.realtime_active),
     }))
     .await;
-    for response_item in injection_items {
-        sess.record_conversation_items(&turn_context, std::slice::from_ref(&response_item))
-            .await;
+    for injection_item in injection_items {
+        if let Some(provenance) = injection_item.skill_read_provenance {
+            turn_context
+                .extension_data
+                .get::<SkillReadTelemetry>()
+                .expect("every turn has skill read telemetry")
+                .register(provenance);
+        }
+        sess.record_conversation_items(
+            &turn_context,
+            std::slice::from_ref(&injection_item.response_item),
+        )
+        .await;
     }
 
     track_turn_resolved_config_analytics(&sess, &turn_context, &input).await;
@@ -723,7 +736,7 @@ async fn build_skills_and_plugins(
     user_input: &[UserInput],
     mentioned_plugins: &[crate::plugins::PluginCapabilitySummary],
     cancellation_token: &CancellationToken,
-) -> Option<(Vec<ResponseItem>, HashSet<String>)> {
+) -> Option<(Vec<TurnInjectionItem>, HashSet<String>)> {
     let turn_context = step_context.turn.as_ref();
     // Guardian input embeds the parent transcript as untrusted evidence. Do not interpret skill or
     // plugin mentions from that generated prompt as requests to inject additional instructions.
@@ -842,19 +855,60 @@ async fn build_skills_and_plugins(
         }
     }
 
-    let mut injection_items: Vec<ResponseItem> = match injected_host_skill_prompts {
+    let session_id = sess.thread_id.to_string();
+    let mut injection_items: Vec<TurnInjectionItem> = match injected_host_skill_prompts {
         Some(injected_host_skill_prompts) => skill_injections
             .iter()
             .filter(|skill| !injected_host_skill_prompts.contains_path(&skill.path))
             .map(|skill| {
-                ContextualUserFragment::into(crate::context::SkillInstructions::from(skill))
+                TurnInjectionItem::host_skill(&session_id, turn_context.sub_id.as_str(), skill)
             })
             .collect(),
-        None => skill_items,
+        None => skill_injections
+            .iter()
+            .map(|skill| {
+                TurnInjectionItem::host_skill(&session_id, turn_context.sub_id.as_str(), skill)
+            })
+            .collect(),
     };
-    injection_items.extend(plugin_items);
-    injection_items.extend(extension_injection_items);
+    injection_items.extend(plugin_items.into_iter().map(TurnInjectionItem::plain));
+    injection_items.extend(
+        extension_injection_items
+            .into_iter()
+            .map(TurnInjectionItem::plain),
+    );
     Some((injection_items, explicitly_enabled_connectors))
+}
+
+struct TurnInjectionItem {
+    response_item: ResponseItem,
+    skill_read_provenance: Option<SkillReadProvenance>,
+}
+
+impl TurnInjectionItem {
+    fn plain(response_item: ResponseItem) -> Self {
+        Self {
+            response_item,
+            skill_read_provenance: None,
+        }
+    }
+
+    fn host_skill(session_id: &str, turn_id: &str, skill: &SkillInjection) -> Self {
+        let mut response_item =
+            ContextualUserFragment::into(crate::context::SkillInstructions::from(skill));
+        response_item.set_id(Some(ResponseItemId::new("msg")));
+        response_item.set_turn_id_if_missing(turn_id);
+        let skill_read_provenance = Some(SkillReadProvenance::for_skill(
+            session_id,
+            turn_id,
+            skill,
+            response_item.clone(),
+        ));
+        Self {
+            response_item,
+            skill_read_provenance,
+        }
+    }
 }
 
 #[tracing::instrument(
@@ -2184,6 +2238,7 @@ async fn try_run_sampling_request(
         .features
         .enabled(Feature::ConcurrentReasoningSummaries)
         && turn_context.provider.info().is_openai();
+    let session_id = sess.thread_id.to_string();
     let mut stream = client_session
         .stream(
             prompt,
@@ -2744,7 +2799,26 @@ async fn try_run_sampling_request(
         }
     }
 
-    outcome
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => return Err(error),
+    };
+    let skill_telemetry = turn_context
+        .extension_data
+        .get::<SkillReadTelemetry>()
+        .expect("every turn has skill read telemetry");
+    if let Some(provider_request) = client_session.take_skill_read_provider_request() {
+        if skill_telemetry
+            .record_successful_provider_request(&session_id, &turn_context.sub_id, provider_request)
+            .is_err()
+        {
+            trace!("skill read telemetry attribution unavailable");
+        }
+    } else {
+        skill_telemetry.record_missing_successful_provider_request();
+    }
+
+    Ok(outcome)
 }
 
 pub(crate) fn get_last_assistant_message_from_turn(responses: &[ResponseItem]) -> Option<String> {

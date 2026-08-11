@@ -12,12 +12,18 @@ use crate::context::TurnAborted;
 use crate::environment_selection::ThreadEnvironments;
 use crate::environment_selection::TurnEnvironmentState;
 use crate::function_tool::FunctionCallError;
+use crate::session::skill_telemetry::CODEX_TMCP_HOST_OBSERVATION_SCHEMA;
+use crate::session::skill_telemetry::SkillReadProvenance;
+use crate::session::skill_telemetry::SkillReadProviderRequest;
+use crate::session::skill_telemetry::SkillReadTelemetry;
 use crate::session::step_context::StepContext;
 use crate::shell::default_user_shell;
 use crate::shell_snapshot::ShellSnapshot;
 use crate::test_support::models_manager_with_provider;
 use crate::tools::format_exec_output_str;
 use crate::tools::registry::ToolRegistry;
+use codex_api::ProviderRequestAttribution;
+use codex_api::ProviderRequestAttributionError;
 use codex_config::ConfigLayerStack;
 use codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID;
 use codex_config::LoaderOverrides;
@@ -32,6 +38,7 @@ use codex_config::types::McpServerTransportConfig;
 use codex_config::types::ToolSuggestDisabledTool;
 use core_test_support::test_codex::local_selections;
 
+use codex_core_skills::injection::SkillInjection;
 use codex_features::Feature;
 use codex_http_client::ClientRouteClass;
 use codex_http_client::HttpClientFactory;
@@ -3208,6 +3215,7 @@ async fn start_new_context_window_assigns_and_persists_item_ids() {
         | RolloutItem::InterAgentCommunicationMetadata { .. }
         | RolloutItem::TurnContext(_)
         | RolloutItem::WorldState(_)
+        | RolloutItem::HostObservation(_)
         | RolloutItem::EventMsg(_) => None,
     });
     assert_eq!(
@@ -3265,6 +3273,7 @@ async fn record_initial_history_assigns_and_persists_id_for_forked_response_item
         | RolloutItem::Compacted(_)
         | RolloutItem::TurnContext(_)
         | RolloutItem::WorldState(_)
+        | RolloutItem::HostObservation(_)
         | RolloutItem::EventMsg(_) => None,
     });
     assert_eq!(
@@ -9610,6 +9619,71 @@ impl SessionTask for CompletingTask {
     }
 }
 
+#[derive(Clone, Copy)]
+struct UnavailableSkillTelemetryTask;
+
+impl SessionTask for UnavailableSkillTelemetryTask {
+    fn kind(&self) -> TaskKind {
+        TaskKind::Regular
+    }
+
+    fn span_name(&self) -> &'static str {
+        "session_task.unavailable_skill_telemetry"
+    }
+
+    async fn run(
+        self: Arc<Self>,
+        session: Arc<Session>,
+        ctx: Arc<TurnContext>,
+        _input: Vec<TurnInput>,
+        _cancellation_token: CancellationToken,
+    ) -> SessionTaskResult {
+        let mut item = ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "unavailable skill body".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        };
+        item.set_id(Some(ResponseItemId::with_suffix(
+            "telemetry",
+            "unavailable",
+        )));
+        let skill = SkillInjection {
+            name: "unavailable".to_string(),
+            path: "/skills/unavailable/SKILL.md".to_string(),
+            contents: "unavailable skill body".to_string(),
+        };
+        let session_id = session.thread_id.to_string();
+        let telemetry = ctx
+            .extension_data
+            .get::<SkillReadTelemetry>()
+            .expect("every turn has skill read telemetry");
+        telemetry.register(SkillReadProvenance::for_skill(
+            &session_id,
+            &ctx.sub_id,
+            &skill,
+            item.clone(),
+        ));
+        let _ = telemetry.record_successful_provider_request(
+            &session_id,
+            &ctx.sub_id,
+            SkillReadProviderRequest {
+                input: vec![item],
+                attribution: ProviderRequestAttribution::Unavailable(
+                    ProviderRequestAttributionError::EncoderRejected {
+                        provider: "test-provider".to_string(),
+                        reason: "sensitive provider error text".to_string(),
+                    },
+                ),
+            },
+        );
+        Ok(None)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TerminalEventKind {
     TurnComplete,
@@ -9914,6 +9988,82 @@ async fn turn_complete_flushes_terminal_event_after_delivery() {
     // 2. Terminal-event flush after TurnComplete is appended.
     let calls = wait_for_flush_count(&store, /*expected_flushes*/ 2).await;
     assert_eq!(2, calls.flush_thread);
+
+    let expected_session_id = sess.thread_id.to_string();
+    let expected_turn_id = tc.sub_id.clone();
+    let persisted = store
+        .read_thread(ReadThreadParams {
+            thread_id: sess.thread_id,
+            include_archived: false,
+            include_history: true,
+        })
+        .await
+        .expect("read persisted terminal batch");
+    let history = persisted
+        .history
+        .expect("terminal history should be loaded");
+    assert!(history.items.windows(2).any(|items| {
+        matches!(
+            items,
+            [
+                RolloutItem::HostObservation(observation),
+                RolloutItem::EventMsg(EventMsg::TurnComplete(event)),
+            ] if observation.schema == CODEX_TMCP_HOST_OBSERVATION_SCHEMA
+                && observation.session_id == expected_session_id
+                && observation.turn_id == expected_turn_id
+                && event.turn_id == expected_turn_id
+        )
+    }));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn turn_complete_flushes_without_unavailable_host_observation() {
+    let (mut sess, tc, rx) = make_session_and_context_with_rx().await;
+    let store = attach_in_memory_thread_store(
+        Arc::get_mut(&mut sess).expect("session should be uniquely owned"),
+    )
+    .await;
+
+    let input = vec![TurnInput::UserInput {
+        content: vec![UserInput::Text {
+            text: "complete without attribution".to_string(),
+            text_elements: Vec::new(),
+        }],
+        client_id: None,
+    }];
+    sess.spawn_task(Arc::clone(&tc), input, UnavailableSkillTelemetryTask)
+        .await;
+
+    let event = recv_terminal_event(&rx, TerminalEventKind::TurnComplete).await;
+    assert!(matches!(event.msg, EventMsg::TurnComplete(_)));
+    let calls = wait_for_flush_count(&store, /*expected_flushes*/ 2).await;
+    assert_eq!(2, calls.flush_thread);
+
+    let persisted = store
+        .read_thread(ReadThreadParams {
+            thread_id: sess.thread_id,
+            include_archived: false,
+            include_history: true,
+        })
+        .await
+        .expect("read persisted terminal batch");
+    let history = persisted
+        .history
+        .expect("terminal history should be loaded");
+    assert!(
+        history
+            .items
+            .iter()
+            .any(|item| matches!(item, RolloutItem::EventMsg(EventMsg::TurnComplete(_))))
+    );
+    assert!(
+        !history
+            .items
+            .iter()
+            .any(|item| matches!(item, RolloutItem::HostObservation(_)))
+    );
+    let serialized = serde_json::to_string(&history.items).expect("serialize persisted history");
+    assert!(!serialized.contains("sensitive provider error text"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -304,7 +304,8 @@ impl ThreadMetadataSync {
                 | RolloutItem::InterAgentCommunication(_)
                 | RolloutItem::InterAgentCommunicationMetadata { .. }
                 | RolloutItem::Compacted(_)
-                | RolloutItem::WorldState(_) => {}
+                | RolloutItem::WorldState(_)
+                | RolloutItem::HostObservation(_) => {}
             }
         }
         Some(update)

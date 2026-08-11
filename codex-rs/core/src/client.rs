@@ -117,6 +117,7 @@ use crate::client_common::ResponseStream;
 use crate::feedback_tags;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::subagent_header_value;
+use crate::session::skill_telemetry::SkillReadProviderRequest;
 use crate::util::emit_feedback_auth_recovery_tags;
 use codex_feedback::FeedbackRequestTags;
 use codex_feedback::emit_feedback_request_tags_with_auth_env;
@@ -283,6 +284,7 @@ pub struct ModelClientSession {
     /// keep sending it unchanged between turn requests (e.g., for retries, incremental
     /// appends, or continuation requests), and must not send it between different turns.
     turn_state: Arc<OnceLock<String>>,
+    last_skill_read_provider_request: Option<SkillReadProviderRequest>,
 }
 
 #[derive(Debug, Clone)]
@@ -494,6 +496,7 @@ impl ModelClient {
             client: self.clone(),
             websocket_session: self.take_cached_websocket_session(),
             turn_state: Arc::new(OnceLock::new()),
+            last_skill_read_provider_request: None,
         }
     }
 
@@ -1127,6 +1130,10 @@ impl Drop for ModelClientSession {
 }
 
 impl ModelClientSession {
+    pub(crate) fn take_skill_read_provider_request(&mut self) -> Option<SkillReadProviderRequest> {
+        self.last_skill_read_provider_request.take()
+    }
+
     pub(crate) fn turn_state(&self) -> Arc<OnceLock<String>> {
         Arc::clone(&self.turn_state)
     }
@@ -1399,7 +1406,7 @@ impl ModelClientSession {
         )
     )]
     async fn stream_responses_api(
-        &self,
+        &mut self,
         prompt: &Prompt,
         model_info: &ModelInfo,
         session_telemetry: &SessionTelemetry,
@@ -1451,6 +1458,7 @@ impl ModelClientSession {
             )?;
             self.client
                 .prepare_response_items_for_request(&mut request.input);
+            let provider_request_input = request.input.clone();
             let request_session_telemetry =
                 session_telemetry_for_request(session_telemetry, &request);
             let inference_trace_attempt = inference_trace.start_attempt();
@@ -1462,10 +1470,16 @@ impl ModelClientSession {
                 client_setup.api_auth,
             )
             .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
-            let stream_result = client.stream_request(request, options).await;
+            let stream_result = client
+                .stream_request_with_attribution(request, options)
+                .await;
 
             match stream_result {
-                Ok(stream) => {
+                Ok((stream, attribution)) => {
+                    self.last_skill_read_provider_request = Some(SkillReadProviderRequest {
+                        input: provider_request_input,
+                        attribution,
+                    });
                     let (stream, _) = map_response_stream(
                         stream,
                         request_session_telemetry,
@@ -1643,6 +1657,10 @@ impl ModelClientSession {
                     .prepare_response_items_for_request(&mut request.input);
                 Some(original_item_ids)
             };
+            let provider_request_input = incremental_items
+                .as_deref()
+                .unwrap_or(&request.input)
+                .to_vec();
             let ws_payload = ResponseCreateWsRequest {
                 previous_response_id,
                 input: incremental_items.as_deref().unwrap_or(&request.input),
@@ -1689,6 +1707,14 @@ impl ModelClientSession {
                 );
                 err
             })?;
+            self.last_skill_read_provider_request = Some(SkillReadProviderRequest {
+                input: provider_request_input,
+                attribution: codex_api::ProviderRequestAttribution::Unavailable(
+                    codex_api::ProviderRequestAttributionError::ProviderDoesNotExposeExactPerItemTokens {
+                        provider: self.client.state.provider.info().name.clone(),
+                    },
+                ),
+            });
             let (stream, last_request_rx) = map_response_stream(
                 stream_result,
                 request_session_telemetry,
@@ -1808,6 +1834,7 @@ impl ModelClientSession {
         responses_metadata: &CodexResponsesMetadata,
         inference_trace: &InferenceTraceContext,
     ) -> Result<ResponseStream> {
+        self.last_skill_read_provider_request = None;
         let wire_api = self.client.state.provider.info().wire_api;
         match wire_api {
             WireApi::Responses => {

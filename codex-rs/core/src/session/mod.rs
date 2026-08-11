@@ -214,6 +214,7 @@ mod rollout_budget;
 mod rollout_reconstruction;
 #[allow(clippy::module_inception)]
 pub(crate) mod session;
+pub(crate) mod skill_telemetry;
 pub(crate) mod step_context;
 pub(crate) mod time_reminder;
 mod token_budget;
@@ -1814,6 +1815,17 @@ impl Session {
 
     /// Persist the event to rollout and send it to clients.
     pub(crate) async fn send_event(&self, turn_context: &TurnContext, msg: EventMsg) {
+        self.send_event_with_rollout_items(turn_context, msg, &[])
+            .await;
+    }
+
+    /// Persists extra terminal metadata in the same rollout append as the event and sends it to clients.
+    pub(crate) async fn send_event_with_rollout_items(
+        &self,
+        turn_context: &TurnContext,
+        msg: EventMsg,
+        additional_rollout_items: &[RolloutItem],
+    ) {
         let legacy_source = msg.clone();
         if let EventMsg::Error(error) = &legacy_source
             && error
@@ -1837,7 +1849,12 @@ impl Session {
             id: turn_context.sub_id.clone(),
             msg,
         };
-        self.send_event_raw(event).await;
+        self.send_event_raw_with_persistence(
+            event,
+            /*persist*/ true,
+            additional_rollout_items,
+        )
+        .await;
         self.maybe_notify_parent_of_terminal_turn(turn_context, &legacy_source)
             .await;
         self.maybe_mirror_event_text_to_realtime(&legacy_source)
@@ -2030,7 +2047,7 @@ impl Session {
     }
 
     pub(crate) async fn send_event_raw(&self, event: Event) {
-        self.send_event_raw_with_persistence(event, /*persist*/ true)
+        self.send_event_raw_with_persistence(event, /*persist*/ true, &[])
             .await;
     }
 
@@ -2044,13 +2061,21 @@ impl Session {
                 true
             }
         };
-        self.send_event_raw_with_persistence(event, persist).await;
+        self.send_event_raw_with_persistence(event, persist, &[])
+            .await;
     }
 
-    async fn send_event_raw_with_persistence(&self, event: Event, persist: bool) {
+    async fn send_event_raw_with_persistence(
+        &self,
+        event: Event,
+        persist: bool,
+        additional_rollout_items: &[RolloutItem],
+    ) {
         // Persist the event into rollout storage; the store applies its persistence policy.
         if persist {
-            let rollout_items = vec![RolloutItem::EventMsg(event.msg.clone())];
+            let mut rollout_items = Vec::with_capacity(additional_rollout_items.len() + 1);
+            rollout_items.extend_from_slice(additional_rollout_items);
+            rollout_items.push(RolloutItem::EventMsg(event.msg.clone()));
             self.persist_rollout_items(&rollout_items).await;
         }
         self.services

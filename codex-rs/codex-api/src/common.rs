@@ -274,6 +274,41 @@ pub struct ResponsesApiRequest {
     pub client_metadata: Option<HashMap<String, String>>,
 }
 
+/// A provider-owned exact attribution result for the input items in a final request.
+///
+/// The encoder must return one provider-token count for every item in the request's `input`
+/// field. The count is usable for telemetry only when the provider's encoder can attribute its
+/// exact tokenization to individual items. Aggregate usage and local estimates must remain an
+/// `Unavailable` result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderRequestAttribution {
+    ExactInputItemTokens(Vec<u64>),
+    Unavailable(ProviderRequestAttributionError),
+}
+
+/// A typed reason why exact per-item provider token attribution is unavailable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderRequestAttributionError {
+    ProviderDoesNotExposeExactPerItemTokens { provider: String },
+    EncoderRejected { provider: String, reason: String },
+    WrongInputItemCount { expected: usize, actual: usize },
+}
+
+/// Provider-owned final-request attribution hook.
+///
+/// Implementations receive the exact uncompressed JSON bytes produced for the provider request,
+/// after the request has been assembled and all provider-specific request transformations have
+/// run. They must return exact provider token counts for each `input` item or a typed error. A
+/// byte count, compact-JSON lexical count, aggregate usage value, or independent approximation is
+/// not a valid implementation.
+pub trait ProviderRequestTokenAttributor: Send + Sync {
+    fn exact_input_item_tokens(
+        &self,
+        request: &ResponsesApiRequest,
+        final_body: &[u8],
+    ) -> Result<Vec<u64>, ProviderRequestAttributionError>;
+}
+
 impl<'a> From<&'a ResponsesApiRequest> for ResponseCreateWsRequest<'a> {
     fn from(request: &'a ResponsesApiRequest) -> Self {
         Self {

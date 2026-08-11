@@ -10,6 +10,7 @@ use codex_api::AuthError;
 use codex_api::AuthProvider;
 use codex_api::Compression;
 use codex_api::Provider;
+use codex_api::ProviderRequestTokenAttributor;
 use codex_api::ResponsesApiRequest;
 use codex_api::ResponsesClient;
 use codex_api::ResponsesOptions;
@@ -76,6 +77,25 @@ impl RecordingState {
 #[derive(Clone)]
 struct RecordingTransport {
     state: RecordingState,
+}
+
+#[derive(Clone, Default)]
+struct ExactAttributor {
+    final_bodies: Arc<Mutex<Vec<Vec<u8>>>>,
+}
+
+impl ProviderRequestTokenAttributor for ExactAttributor {
+    fn exact_input_item_tokens(
+        &self,
+        request: &ResponsesApiRequest,
+        final_body: &[u8],
+    ) -> std::result::Result<Vec<u64>, codex_api::ProviderRequestAttributionError> {
+        self.final_bodies
+            .lock()
+            .expect("attributor mutex should not be poisoned")
+            .push(final_body.to_vec());
+        Ok(vec![41; request.input.len()])
+    }
 }
 
 impl RecordingTransport {
@@ -352,6 +372,60 @@ async fn responses_client_stream_request_preserves_item_ids() -> Result<()> {
     assert_eq!(
         prepared.headers.get(http::header::CONTENT_TYPE),
         Some(&HeaderValue::from_static("application/json"))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn exact_attribution_is_bound_to_the_captured_final_provider_request() -> Result<()> {
+    let state = RecordingState::default();
+    let transport = RecordingTransport::new(state.clone());
+    let attributor = ExactAttributor::default();
+    let client = ResponsesClient::new(transport, provider("openai"), Arc::new(NoAuth))
+        .with_provider_request_token_attributor(Arc::new(attributor.clone()));
+    let request = ResponsesApiRequest {
+        model: "gpt-test".into(),
+        instructions: "Say hi".into(),
+        input: vec![ResponseItem::Message {
+            id: Some(ResponseItemId::with_suffix("msg", "exact")),
+            role: "user".into(),
+            content: vec![ContentItem::InputText { text: "hi".into() }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }],
+        tools: None,
+        tool_choice: "auto".into(),
+        parallel_tool_calls: false,
+        reasoning: None,
+        store: false,
+        stream: true,
+        stream_options: None,
+        include: Vec::new(),
+        service_tier: None,
+        prompt_cache_key: None,
+        text: None,
+        client_metadata: None,
+    };
+    let expected_body = serde_json::to_vec(&request)?;
+
+    let (_stream, attribution) = client
+        .stream_request_with_attribution(request, ResponsesOptions::default())
+        .await?;
+
+    assert_eq!(
+        attribution,
+        codex_api::ProviderRequestAttribution::ExactInputItemTokens(vec![41])
+    );
+    let requests = state.take_stream_requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(request_body_bytes(&requests[0]), expected_body.as_slice());
+    assert_eq!(
+        attributor
+            .final_bodies
+            .lock()
+            .expect("attributor mutex should not be poisoned")
+            .as_slice(),
+        &[expected_body]
     );
     Ok(())
 }

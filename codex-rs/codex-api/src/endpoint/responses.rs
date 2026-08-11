@@ -1,4 +1,7 @@
 use crate::auth::SharedAuthProvider;
+use crate::common::ProviderRequestAttribution;
+use crate::common::ProviderRequestAttributionError;
+use crate::common::ProviderRequestTokenAttributor;
 use crate::common::ResponseStream;
 use crate::common::ResponsesApiRequest;
 use crate::endpoint::session::EndpointSession;
@@ -26,6 +29,7 @@ use tracing::instrument;
 pub struct ResponsesClient<T: HttpTransport> {
     session: EndpointSession<T>,
     sse_telemetry: Option<Arc<dyn SseTelemetry>>,
+    provider_request_token_attributor: Option<Arc<dyn ProviderRequestTokenAttributor>>,
 }
 
 #[derive(Default)]
@@ -43,6 +47,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
         Self {
             session: EndpointSession::new(transport, provider, auth),
             sse_telemetry: None,
+            provider_request_token_attributor: None,
         }
     }
 
@@ -54,7 +59,21 @@ impl<T: HttpTransport> ResponsesClient<T> {
         Self {
             session: self.session.with_request_telemetry(request),
             sse_telemetry: sse,
+            provider_request_token_attributor: self.provider_request_token_attributor,
         }
+    }
+
+    /// Installs the provider-owned exact token attributor for final request bodies.
+    ///
+    /// Providers that cannot expose exact per-input-item tokenization leave this unset. The
+    /// resulting request still proceeds, but its attribution is explicitly unavailable and must
+    /// not be replaced with a local estimate.
+    pub fn with_provider_request_token_attributor(
+        mut self,
+        attributor: Arc<dyn ProviderRequestTokenAttributor>,
+    ) -> Self {
+        self.provider_request_token_attributor = Some(attributor);
+        self
     }
 
     #[instrument(
@@ -72,6 +91,22 @@ impl<T: HttpTransport> ResponsesClient<T> {
         request: ResponsesApiRequest,
         options: ResponsesOptions,
     ) -> Result<ResponseStream, ApiError> {
+        let (stream, _) = self
+            .stream_request_with_attribution(request, options)
+            .await?;
+        Ok(stream)
+    }
+
+    /// Streams a request and returns the attribution produced from the exact final request body.
+    ///
+    /// Attribution is computed before transport retries and is reused with the same encoded body
+    /// for every attempt. A provider without an exact attributor returns `Unavailable` while the
+    /// provider request itself remains eligible to proceed.
+    pub async fn stream_request_with_attribution(
+        &self,
+        request: ResponsesApiRequest,
+        options: ResponsesOptions,
+    ) -> Result<(ResponseStream, ProviderRequestAttribution), ApiError> {
         let ResponsesOptions {
             session_id,
             thread_id,
@@ -83,6 +118,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
 
         let body = EncodedJsonBody::encode(&request)
             .map_err(|e| ApiError::Stream(format!("failed to encode responses request: {e}")))?;
+        let attribution = self.provider_request_attribution(&request, body.as_bytes());
 
         let mut headers = extra_headers;
         if let Some(ref thread_id) = thread_id {
@@ -93,8 +129,37 @@ impl<T: HttpTransport> ResponsesClient<T> {
             insert_header(&mut headers, "x-openai-subagent", &subagent);
         }
 
-        self.stream_encoded(body, headers, compression, turn_state)
-            .await
+        let stream = self
+            .stream_encoded(body, headers, compression, turn_state)
+            .await?;
+        Ok((stream, attribution))
+    }
+
+    fn provider_request_attribution(
+        &self,
+        request: &ResponsesApiRequest,
+        final_body: &[u8],
+    ) -> ProviderRequestAttribution {
+        let Some(attributor) = &self.provider_request_token_attributor else {
+            return ProviderRequestAttribution::Unavailable(
+                ProviderRequestAttributionError::ProviderDoesNotExposeExactPerItemTokens {
+                    provider: self.session.provider().name.clone(),
+                },
+            );
+        };
+
+        match attributor.exact_input_item_tokens(request, final_body) {
+            Ok(tokens) if tokens.len() == request.input.len() => {
+                ProviderRequestAttribution::ExactInputItemTokens(tokens)
+            }
+            Ok(tokens) => ProviderRequestAttribution::Unavailable(
+                ProviderRequestAttributionError::WrongInputItemCount {
+                    expected: request.input.len(),
+                    actual: tokens.len(),
+                },
+            ),
+            Err(error) => ProviderRequestAttribution::Unavailable(error),
+        }
     }
 
     fn path() -> &'static str {

@@ -3033,6 +3033,7 @@ fn multi_agent_version_from_items(
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::Compacted(_)
             | RolloutItem::WorldState(_)
+            | RolloutItem::HostObservation(_)
             | RolloutItem::EventMsg(_) => None,
         })
     })
@@ -3216,7 +3217,23 @@ pub enum RolloutItem {
     Compacted(CompactedItem),
     TurnContext(TurnContextItem),
     WorldState(WorldStateItem),
+    HostObservation(HostObservationItem),
     EventMsg(EventMsg),
+}
+
+/// Host-owned telemetry persisted next to a terminal turn event.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+pub struct HostObservationItem {
+    pub schema: String,
+    pub session_id: String,
+    pub turn_id: String,
+    pub host_metrics: HostObservationMetrics,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+pub struct HostObservationMetrics {
+    pub skill_read_calls: u64,
+    pub skill_read_input_tokens: u64,
 }
 
 /// Persisted comparison state used to resume model-visible world-state diffing.
@@ -6297,6 +6314,53 @@ mod tests {
         assert_eq!(value["msg"]["failed"][0]["server"], "b");
         assert_eq!(value["msg"]["failed"][0]["error"], "bad");
         assert_eq!(value["msg"]["cancelled"][0], "c");
+        Ok(())
+    }
+
+    #[test]
+    fn host_observation_rollout_item_round_trips_with_native_schema() -> Result<()> {
+        let item = RolloutItem::HostObservation(HostObservationItem {
+            schema: "codex-tmcp-host-observation-v0.1".to_string(),
+            session_id: "session".to_string(),
+            turn_id: "turn".to_string(),
+            host_metrics: HostObservationMetrics {
+                skill_read_calls: 1,
+                skill_read_input_tokens: 842,
+            },
+        });
+
+        let value = serde_json::to_value(&item)?;
+        assert_eq!(
+            value,
+            json!({
+                "type": "host_observation",
+                "payload": {
+                    "schema": "codex-tmcp-host-observation-v0.1",
+                    "session_id": "session",
+                    "turn_id": "turn",
+                    "host_metrics": {
+                        "skill_read_calls": 1,
+                        "skill_read_input_tokens": 842,
+                    },
+                },
+            })
+        );
+        let decoded = serde_json::from_value::<RolloutItem>(value)?;
+        assert_eq!(
+            serde_json::to_value(decoded)?,
+            json!({
+                "type": "host_observation",
+                "payload": {
+                    "schema": "codex-tmcp-host-observation-v0.1",
+                    "session_id": "session",
+                    "turn_id": "turn",
+                    "host_metrics": {
+                        "skill_read_calls": 1,
+                        "skill_read_input_tokens": 842,
+                    },
+                },
+            })
+        );
         Ok(())
     }
 
