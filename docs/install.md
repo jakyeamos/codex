@@ -38,6 +38,7 @@ cargo build
 cargo run --bin codex -- "explain this codebase to me"
 
 # After making changes, use the root justfile helpers (they default to codex-rs):
+just preflight
 just fmt
 just fix -p <crate-you-touched>
 
