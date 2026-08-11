@@ -1,5 +1,14 @@
 # Rust/codex-rs
 
+## Quality evidence checkpoint
+
+Last reviewed: 2026-08-11.
+
+The repository instructions, completion checks, and executable quality commands
+were reviewed on this date. This checkpoint keeps the evidence current; it
+does not claim that every check passes. Re-run the documented checks and the
+fleet audit when these contracts or the target branch changes.
+
 In the codex-rs folder where the rust code lives:
 
 - Crate names are prefixed with `codex-`. For example, the `core` folder's crate is named `codex-core`
