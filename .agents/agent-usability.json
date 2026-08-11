@@ -1,0 +1,117 @@
+{
+  "schema": "agent-usability/v1",
+  "reviewed_at": "2026-08-11",
+  "applicability": "applicable",
+  "tools": [
+    {
+      "id": "codex-cli",
+      "kind": "agent-cli",
+      "documentation": [
+        "AGENTS.md"
+      ],
+      "skills": [
+        "babysit-pr",
+        "code-review",
+        "code-review-breaking-changes",
+        "code-review-change-size",
+        "code-review-context",
+        "code-review-testing",
+        "codex-bug",
+        "codex-issue-digest",
+        "codex-pr-body",
+        "path-types",
+        "pushing-ci-changes",
+        "remote-tests",
+        "test-tui",
+        "update-v8-version"
+      ],
+      "behavior_evidence": []
+    }
+  ],
+  "skills": [
+    {
+      "id": "babysit-pr",
+      "family": "codex-babysit",
+      "source": "hosted",
+      "contract_path": ".codex/skills/babysit-pr/SKILL.md"
+    },
+    {
+      "id": "code-review",
+      "family": "codex-code-review",
+      "source": "hosted",
+      "contract_path": ".codex/skills/code-review/SKILL.md"
+    },
+    {
+      "id": "code-review-breaking-changes",
+      "family": "codex-code-review",
+      "source": "hosted",
+      "contract_path": ".codex/skills/code-review-breaking-changes/SKILL.md"
+    },
+    {
+      "id": "code-review-change-size",
+      "family": "codex-code-review",
+      "source": "hosted",
+      "contract_path": ".codex/skills/code-review-change-size/SKILL.md"
+    },
+    {
+      "id": "code-review-context",
+      "family": "codex-code-review",
+      "source": "hosted",
+      "contract_path": ".codex/skills/code-review-context/SKILL.md"
+    },
+    {
+      "id": "code-review-testing",
+      "family": "codex-code-review",
+      "source": "hosted",
+      "contract_path": ".codex/skills/code-review-testing/SKILL.md"
+    },
+    {
+      "id": "codex-bug",
+      "family": "codex-codex",
+      "source": "hosted",
+      "contract_path": ".codex/skills/codex-bug/SKILL.md"
+    },
+    {
+      "id": "codex-issue-digest",
+      "family": "codex-codex",
+      "source": "hosted",
+      "contract_path": ".codex/skills/codex-issue-digest/SKILL.md"
+    },
+    {
+      "id": "codex-pr-body",
+      "family": "codex-codex",
+      "source": "hosted",
+      "contract_path": ".codex/skills/codex-pr-body/SKILL.md"
+    },
+    {
+      "id": "path-types",
+      "family": "codex-path",
+      "source": "hosted",
+      "contract_path": ".codex/skills/path-types/SKILL.md"
+    },
+    {
+      "id": "pushing-ci-changes",
+      "family": "codex-pushing",
+      "source": "hosted",
+      "contract_path": ".codex/skills/pushing-ci-changes/SKILL.md"
+    },
+    {
+      "id": "remote-tests",
+      "family": "codex-remote",
+      "source": "hosted",
+      "contract_path": ".codex/skills/remote-tests/SKILL.md"
+    },
+    {
+      "id": "test-tui",
+      "family": "codex-test",
+      "source": "hosted",
+      "contract_path": ".codex/skills/test-tui/SKILL.md"
+    },
+    {
+      "id": "update-v8-version",
+      "family": "codex-update",
+      "source": "hosted",
+      "contract_path": ".codex/skills/update-v8-version/SKILL.md"
+    }
+  ]
+}

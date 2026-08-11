@@ -1,0 +1,29 @@
+{
+  "schema_version": "change-surface-matrix/v1",
+  "subject": {"kind": "repository", "id": "codex"},
+  "owner": "repository-owner",
+  "last_reviewed": "2026-08-11",
+  "surfaces": [
+    {
+      "id": "codex-core",
+      "scope": "local",
+      "path": "codex-rs/, scripts/, sdk/",
+      "owner": "repository-owner",
+      "condition": "CLI, runtime, state, protocol, or SDK behavior changes",
+      "operations": ["add", "change", "remove"],
+      "validation": ["just test", "just fmt-check", "just clippy"],
+      "status": "applicable"
+    },
+    {
+      "id": "agent-consumers",
+      "scope": "external",
+      "path": ".codex/skills/, Codex Desktop, IDE integrations, and plugin consumers",
+      "owner": "integration-owner",
+      "condition": "skill, tool, protocol, installer, or consumer-facing contract changes",
+      "operations": ["add", "change", "remove"],
+      "validation": ["just test", "consumer-specific integration readback"],
+      "status": "applicable"
+    }
+  ],
+  "unresolved_surfaces": []
+}
