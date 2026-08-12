@@ -443,6 +443,7 @@ pub(crate) struct SessionSpawnArgs {
     pub(crate) originator: String,
     pub(crate) agent_control: AgentControl,
     pub(crate) dynamic_tools: Vec<DynamicToolSpec>,
+    pub(crate) restore_dynamic_tools_from_history: bool,
     pub(crate) metrics_service_name: Option<String>,
     pub(crate) inherited_exec_policy: Option<Arc<ExecPolicyManager>>,
     pub(crate) inherited_environments: Option<TurnEnvironmentSnapshot>,
@@ -539,6 +540,7 @@ impl Session {
             originator,
             agent_control,
             dynamic_tools,
+            restore_dynamic_tools_from_history,
             metrics_service_name,
             user_shell_override,
             inherited_exec_policy,
@@ -700,7 +702,7 @@ impl Session {
             .unwrap_or_else(|| model_info.get_model_instructions(config.personality));
 
         // Dynamic tools are defined at thread start and persisted in rollout session metadata.
-        let dynamic_tools = if dynamic_tools.is_empty() {
+        let dynamic_tools = if restore_dynamic_tools_from_history && dynamic_tools.is_empty() {
             conversation_history.get_dynamic_tools().unwrap_or_default()
         } else {
             dynamic_tools

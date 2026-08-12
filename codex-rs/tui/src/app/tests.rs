@@ -2165,6 +2165,7 @@ async fn handle_start_side_seeds_navigation_before_thread_started() -> Result<()
         &mut app_server,
         parent_thread_id,
         /*user_message*/ None,
+        "test",
     ))
     .await?;
 
@@ -2202,6 +2203,50 @@ async fn handle_start_side_seeds_navigation_before_thread_started() -> Result<()
 
     assert!(saw_thread_started);
     app_server.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn side_dynamic_tool_request_dispatches_a_normalized_app_event() -> Result<()> {
+    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    while app_event_rx.try_recv().is_ok() {}
+    let app_server =
+        crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref()).await?;
+    let parent_thread_id = ThreadId::new();
+
+    app.handle_app_server_event(
+        &app_server,
+        codex_app_server_client::AppServerEvent::ServerRequest(Box::new(
+            ServerRequest::DynamicToolCall {
+                request_id: AppServerRequestId::Integer(77),
+                params: codex_app_server_protocol::DynamicToolCallParams {
+                    thread_id: parent_thread_id.to_string(),
+                    turn_id: "turn-1".to_string(),
+                    call_id: "call-1".to_string(),
+                    namespace: Some("side_conversation".to_string()),
+                    tool: "ask".to_string(),
+                    arguments: serde_json::json!({
+                        "purpose": " Rating-Scale ",
+                        "prompt": " Define the rating scale. "
+                    }),
+                },
+            },
+        )),
+    )
+    .await;
+
+    assert_matches!(
+        app_event_rx.try_recv(),
+        Ok(AppEvent::AskSideConversation {
+            parent_thread_id: actual_parent_thread_id,
+            request_id: AppServerRequestId::Integer(77),
+            purpose,
+            prompt,
+            reuse: true,
+        }) if actual_parent_thread_id == parent_thread_id
+            && purpose == "rating-scale"
+            && prompt == "Define the rating scale."
+    );
     Ok(())
 }
 

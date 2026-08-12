@@ -1758,7 +1758,7 @@ If the session approval policy uses `Granular` with `request_permissions: false`
 
 ### Dynamic tool calls (experimental)
 
-`dynamicTools` on `thread/start` and the corresponding `item/tool/call` request/response flow are experimental APIs. To enable them, set `initialize.params.capabilities.experimentalApi = true`.
+`dynamicTools` on `thread/start` or `thread/resume` and the corresponding `item/tool/call` request/response flow are experimental APIs. To enable them, set `initialize.params.capabilities.experimentalApi = true`. On resume, omit `dynamicTools` to restore the tools persisted in rollout metadata, or provide it to replace the resumed thread's dynamic tools.
 
 Each entry in `dynamicTools` is either a top-level function or a namespace containing function tools. Dynamic tool identifiers follow the same constraints as Responses tools:
 

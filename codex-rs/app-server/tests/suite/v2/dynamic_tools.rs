@@ -2,6 +2,7 @@ use anyhow::Context;
 use anyhow::Result;
 use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
+use app_test_support::create_fake_rollout;
 use app_test_support::create_final_assistant_message_sse_response;
 use app_test_support::create_mock_responses_server_sequence_unchecked;
 use app_test_support::to_response;
@@ -21,6 +22,8 @@ use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadResumeParams;
+use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::TurnStartParams;
@@ -53,6 +56,81 @@ const REMOTE_IMAGE_URL_ERROR: &str =
 const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(60);
 #[cfg(not(any(target_os = "macos", windows)))]
 const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[tokio::test]
+async fn thread_resume_replaces_saved_dynamic_tools_for_the_next_turn() -> Result<()> {
+    let responses = vec![create_final_assistant_message_sse_response("Done")?];
+    let server = create_mock_responses_server_sequence_unchecked(responses).await;
+
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    let thread_id = create_fake_rollout(
+        codex_home.path(),
+        "2025-01-05T12-00-00",
+        "2025-01-05T12:00:00Z",
+        "Saved user message",
+        Some("mock_provider"),
+        /*git_info*/ None,
+    )?;
+
+    let dynamic_tool = DynamicToolSpec::Namespace(DynamicToolNamespaceSpec {
+        name: "side_conversation".to_string(),
+        description: "Open a purpose-bound side conversation.".to_string(),
+        tools: vec![DynamicToolNamespaceTool::Function(
+            DynamicToolFunctionSpec {
+                name: "ask".to_string(),
+                description: "Ask a side conversation.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "purpose": { "type": "string" },
+                        "prompt": { "type": "string" }
+                    },
+                    "required": ["purpose", "prompt"],
+                    "additionalProperties": false
+                }),
+                defer_loading: false,
+            },
+        )],
+    });
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build()
+        .await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    let resume_id = mcp
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: thread_id.clone(),
+            dynamic_tools: Some(vec![dynamic_tool]),
+            ..Default::default()
+        })
+        .await?;
+    let ThreadResumeResponse { thread, .. } =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(resume_id)).await??;
+    assert_eq!(thread.id, thread_id);
+
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.start_turn_and_wait_for_completion(TurnStartParams {
+            thread_id,
+            input: vec![V2UserInput::Text {
+                text: "Rate this.".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        }),
+    )
+    .await??;
+
+    let bodies = responses_bodies(&server).await?;
+    let namespace = find_tool(&bodies[0], "side_conversation")
+        .context("expected resumed thread to expose the replacement dynamic tool namespace")?;
+    assert_eq!(namespace["tools"][0]["name"], "ask");
+
+    Ok(())
+}
 
 #[tokio::test]
 async fn thread_start_normalizes_legacy_dynamic_tools_into_model_request() -> Result<()> {
