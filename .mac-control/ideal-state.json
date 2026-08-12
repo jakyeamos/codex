@@ -1,0 +1,8 @@
+{
+  "schema": "mac-control-task-manifest/v3",
+  "repository_id": "repo-476a27b5bf1e48ab",
+  "repository_name": "codex",
+  "applicability": "not_applicable",
+  "applicability_reason": "This checkout owns Codex CLI and agent infrastructure; it does not contain the separate desktop application's supported Mac Control task surface.",
+  "tasks": []
+}
