@@ -44,6 +44,7 @@ use crate::shell::ShellType;
 use crate::tools::network_approval::DeferredNetworkApproval;
 
 mod async_watcher;
+mod authorization_bridge;
 mod errors;
 mod head_tail_buffer;
 mod process;
@@ -54,6 +55,7 @@ pub(crate) fn set_deterministic_process_ids_for_tests(enabled: bool) {
     process_manager::set_deterministic_process_ids_for_tests(enabled);
 }
 
+pub(crate) use authorization_bridge::MacControlAuthorizationLifecycle;
 pub(crate) use errors::UnifiedExecError;
 pub(crate) use process::NoopSpawnLifecycle;
 #[cfg(unix)]
