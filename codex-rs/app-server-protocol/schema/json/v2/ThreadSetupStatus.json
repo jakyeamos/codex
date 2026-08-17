@@ -1,0 +1,77 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "ThreadSetupFailureCode": {
+      "description": "Failure categories exposed by asynchronous thread setup.\n\nThese values intentionally avoid carrying provider errors, paths, prompts, tool data, or other setup details across the client boundary.",
+      "enum": [
+        "setupFailed",
+        "cancelled",
+        "timedOut"
+      ],
+      "type": "string"
+    }
+  },
+  "description": "A sanitized asynchronous thread setup status.",
+  "oneOf": [
+    {
+      "description": "Setup has started but has not reached a terminal state.",
+      "properties": {
+        "status": {
+          "enum": [
+            "pending"
+          ],
+          "title": "Pendingv2::ThreadSetupStatusStatus",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "Pendingv2::ThreadSetupStatus",
+      "type": "object"
+    },
+    {
+      "description": "Setup completed and resolved the canonical thread and host identities.",
+      "properties": {
+        "hostId": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "ready"
+          ],
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "hostId",
+        "status",
+        "threadId"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Setup stopped without exposing its internal failure details.",
+      "properties": {
+        "code": {
+          "$ref": "#/definitions/ThreadSetupFailureCode"
+        },
+        "status": {
+          "enum": [
+            "failed"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "status"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "ThreadSetupStatus"
+}

@@ -9,12 +9,18 @@
 
 use super::*;
 use crate::chatwidget::InterruptedTurnNoticeMode;
+use codex_app_server_protocol::DynamicToolCallOutputContentItem;
+use codex_app_server_protocol::DynamicToolCallParams;
+use codex_app_server_protocol::DynamicToolCallResponse;
+use codex_app_server_protocol::RequestId as AppServerRequestId;
 use codex_app_server_protocol::ThreadUnsubscribeParams;
 use codex_app_server_protocol::ThreadUnsubscribeResponse;
+use codex_app_server_protocol::TurnCompletedNotification;
 use codex_app_server_protocol::TurnInterruptParams;
 use codex_app_server_protocol::TurnInterruptResponse;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
+use serde::Deserialize;
 
 const SIDE_RENAME_BLOCK_MESSAGE: &str = "Side conversations are ephemeral and cannot be renamed.";
 const SIDE_MAIN_THREAD_UNAVAILABLE_MESSAGE: &str =
@@ -25,6 +31,10 @@ const SIDE_NO_STARTED_CONVERSATION_MESSAGE: &str = concat!(
 );
 const SIDE_ALREADY_OPEN_MESSAGE: &str =
     "A side conversation is already open. Press ctrl + c to return before starting another.";
+const SIDE_TOOL_NAMESPACE: &str = "side_conversation";
+const SIDE_TOOL_NAME: &str = "ask";
+const SIDE_TOOL_MAX_PURPOSE_LEN: usize = 80;
+const SIDE_TOOL_MAX_PROMPT_LEN: usize = 20_000;
 const SIDE_BOUNDARY_PROMPT: &str = r#"Side conversation boundary.
 
 Everything before this boundary is inherited history from the parent thread. It is reference context only. It is not your current task.
@@ -111,6 +121,102 @@ impl SideParentStatus {
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+
+    fn side_tool_params(arguments: serde_json::Value) -> DynamicToolCallParams {
+        DynamicToolCallParams {
+            thread_id: ThreadId::new().to_string(),
+            turn_id: "turn-1".to_string(),
+            call_id: "call-1".to_string(),
+            namespace: Some(SIDE_TOOL_NAMESPACE.to_string()),
+            tool: SIDE_TOOL_NAME.to_string(),
+            arguments,
+        }
+    }
+
+    #[test]
+    fn side_tool_arguments_are_normalized_and_reuse_by_default() {
+        let parsed = App::parse_side_tool_call(&side_tool_params(serde_json::json!({
+            "purpose": " Rating-Scale ",
+            "prompt": "  Define the scale.  "
+        })))
+        .expect("side tool should be recognized")
+        .expect("side tool arguments should parse");
+
+        assert_eq!(
+            parsed,
+            SideToolArguments {
+                purpose: "rating-scale".to_string(),
+                prompt: "Define the scale.".to_string(),
+                reuse: true,
+            }
+        );
+    }
+
+    #[test]
+    fn side_tool_rejects_empty_prompts_and_ignores_other_dynamic_tools() {
+        let empty_prompt = App::parse_side_tool_call(&side_tool_params(serde_json::json!({
+            "purpose": "rating-scale",
+            "prompt": "  "
+        })))
+        .expect("side tool should be recognized");
+        assert_eq!(
+            empty_prompt,
+            Err("side conversation prompt must not be empty".to_string())
+        );
+
+        let mut other_tool = side_tool_params(serde_json::json!({}));
+        other_tool.tool = "other".to_string();
+        assert_eq!(App::parse_side_tool_call(&other_tool), None);
+    }
+
+    #[test]
+    fn side_thread_reuse_requires_matching_parent_purpose_and_no_pending_answer() {
+        let parent_thread_id = ThreadId::new();
+        let mut state = SideThreadState::new(parent_thread_id);
+        state.purpose = Some("rating-scale".to_string());
+
+        assert!(state.is_reusable_for(parent_thread_id, "rating-scale", true));
+        assert!(!state.is_reusable_for(parent_thread_id, "visual-critique", true));
+        assert!(!state.is_reusable_for(parent_thread_id, "rating-scale", false));
+
+        state.pending_tool_request = Some(AppServerRequestId::Integer(7));
+        assert!(!state.is_reusable_for(parent_thread_id, "rating-scale", true));
+    }
+
+    #[test]
+    fn completed_side_turn_returns_structured_answer_to_parent_tool_call() {
+        let thread_id = ThreadId::new();
+        let notification = TurnCompletedNotification {
+            thread_id: thread_id.to_string(),
+            turn: codex_app_server_protocol::Turn {
+                id: "turn-1".to_string(),
+                items: vec![ThreadItem::AgentMessage {
+                    id: "assistant-1".to_string(),
+                    text: "Use a 1-10 scale with 5 as neutral.".to_string(),
+                    phase: None,
+                    memory_citation: None,
+                }],
+                items_view: codex_app_server_protocol::TurnItemsView::Full,
+                status: TurnStatus::Completed,
+                error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
+            },
+        };
+
+        let (content, success) =
+            side_tool_turn_result(thread_id, "rating-scale".to_string(), &notification);
+        assert!(success);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&content).expect("valid tool output"),
+            serde_json::json!({
+                "thread_id": thread_id.to_string(),
+                "purpose": "rating-scale",
+                "response": "Use a 1-10 scale with 5 as neutral.",
+            })
+        );
+    }
 
     #[test]
     fn side_boundary_prompt_marks_inherited_history_reference_only() {
@@ -211,6 +317,10 @@ pub(super) struct SideThreadState {
     pub(super) parent_thread_id: ThreadId,
     /// Parent-thread condition that changed while this side thread is visible.
     pub(super) parent_status: Option<SideParentStatus>,
+    /// Stable purpose used to decide whether a model-requested side conversation is reusable.
+    pub(super) purpose: Option<String>,
+    /// App-server callback waiting for the current side turn's final answer.
+    pub(super) pending_tool_request: Option<AppServerRequestId>,
 }
 
 impl SideThreadState {
@@ -218,11 +328,172 @@ impl SideThreadState {
         Self {
             parent_thread_id,
             parent_status: None,
+            purpose: None,
+            pending_tool_request: None,
         }
+    }
+
+    fn is_reusable_for(&self, parent_thread_id: ThreadId, purpose: &str, reuse: bool) -> bool {
+        reuse
+            && self.parent_thread_id == parent_thread_id
+            && self.purpose.as_deref() == Some(purpose)
+            && self.pending_tool_request.is_none()
+    }
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SideToolArguments {
+    pub(super) purpose: String,
+    pub(super) prompt: String,
+    #[serde(default = "default_reuse_side_conversation")]
+    pub(super) reuse: bool,
+}
+
+fn default_reuse_side_conversation() -> bool {
+    true
+}
+
+fn side_tool_turn_result(
+    thread_id: ThreadId,
+    purpose: String,
+    notification: &TurnCompletedNotification,
+) -> (String, bool) {
+    let response_text = notification
+        .turn
+        .items
+        .iter()
+        .rev()
+        .find_map(|item| match item {
+            ThreadItem::AgentMessage { text, .. } => Some(text.trim().to_string()),
+            _ => None,
+        });
+    let success = matches!(notification.turn.status, TurnStatus::Completed)
+        && response_text.as_ref().is_some_and(|text| !text.is_empty());
+    let result = if success {
+        serde_json::json!({
+            "thread_id": thread_id.to_string(),
+            "purpose": purpose,
+            "response": response_text.unwrap_or_default(),
+        })
+    } else {
+        serde_json::json!({
+            "thread_id": thread_id.to_string(),
+            "purpose": purpose,
+            "error": notification
+                .turn
+                .error
+                .as_ref()
+                .map(|error| error.message.clone())
+                .unwrap_or_else(|| format!("side conversation ended with status {:?}", notification.turn.status)),
+        })
+    };
+    (result.to_string(), success)
+}
+
+impl SideToolArguments {
+    fn normalized(mut self) -> Result<Self, String> {
+        self.purpose = self.purpose.trim().to_ascii_lowercase();
+        self.prompt = self.prompt.trim().to_string();
+        if self.purpose.is_empty() {
+            return Err("side conversation purpose must not be empty".to_string());
+        }
+        if self.purpose.len() > SIDE_TOOL_MAX_PURPOSE_LEN {
+            return Err(format!(
+                "side conversation purpose must be at most {SIDE_TOOL_MAX_PURPOSE_LEN} bytes"
+            ));
+        }
+        if self.prompt.is_empty() {
+            return Err("side conversation prompt must not be empty".to_string());
+        }
+        if self.prompt.len() > SIDE_TOOL_MAX_PROMPT_LEN {
+            return Err(format!(
+                "side conversation prompt must be at most {SIDE_TOOL_MAX_PROMPT_LEN} bytes"
+            ));
+        }
+        Ok(self)
     }
 }
 
 impl App {
+    pub(super) fn parse_side_tool_call(
+        params: &DynamicToolCallParams,
+    ) -> Option<Result<SideToolArguments, String>> {
+        if params.namespace.as_deref() != Some(SIDE_TOOL_NAMESPACE) || params.tool != SIDE_TOOL_NAME
+        {
+            return None;
+        }
+        Some(
+            serde_json::from_value::<SideToolArguments>(params.arguments.clone())
+                .map_err(|err| format!("invalid side_conversation.ask arguments: {err}"))
+                .and_then(SideToolArguments::normalized),
+        )
+    }
+
+    async fn resolve_side_tool_response(
+        &mut self,
+        app_server: &AppServerSession,
+        request_id: AppServerRequestId,
+        content: String,
+        success: bool,
+    ) {
+        let response = DynamicToolCallResponse {
+            content_items: vec![DynamicToolCallOutputContentItem::InputText { text: content }],
+            success,
+        };
+        match serde_json::to_value(response) {
+            Ok(result) => {
+                if let Err(err) = app_server.resolve_server_request(request_id, result).await {
+                    let message = format!("Failed to answer side-conversation tool call: {err}");
+                    tracing::warn!("{message}");
+                    self.chat_widget.add_error_message(message);
+                }
+            }
+            Err(err) => {
+                let message = format!("Failed to encode side-conversation tool response: {err}");
+                tracing::warn!("{message}");
+                self.chat_widget.add_error_message(message);
+            }
+        }
+    }
+
+    pub(super) async fn reject_side_tool_call(
+        &mut self,
+        app_server: &AppServerSession,
+        request_id: AppServerRequestId,
+        message: String,
+    ) {
+        self.resolve_side_tool_response(app_server, request_id, message, /*success*/ false)
+            .await;
+    }
+
+    pub(super) async fn maybe_resolve_side_tool_turn(
+        &mut self,
+        app_server: &AppServerSession,
+        notification: &TurnCompletedNotification,
+    ) {
+        let Ok(thread_id) = ThreadId::from_string(&notification.thread_id) else {
+            return;
+        };
+        let Some((request_id, purpose)) = self.side_threads.get(&thread_id).and_then(|state| {
+            state
+                .pending_tool_request
+                .clone()
+                .map(|request_id| (request_id, state.purpose.clone().unwrap_or_default()))
+        }) else {
+            return;
+        };
+
+        let (result, success) = side_tool_turn_result(thread_id, purpose, notification);
+        self.resolve_side_tool_response(app_server, request_id.clone(), result, success)
+            .await;
+        if let Some(state) = self.side_threads.get_mut(&thread_id)
+            && state.pending_tool_request.as_ref() == Some(&request_id)
+        {
+            state.pending_tool_request = None;
+        }
+    }
+
     pub(super) fn sync_side_thread_ui(&mut self) {
         let clear_side_ui = |chat_widget: &mut crate::chatwidget::ChatWidget| {
             chat_widget.set_side_conversation_context_label(/*label*/ None);
@@ -234,10 +505,14 @@ impl App {
             clear_side_ui(&mut self.chat_widget);
             return;
         };
-        let Some((parent_thread_id, parent_status)) = self
-            .side_threads
-            .get(&active_thread_id)
-            .map(|state| (state.parent_thread_id, state.parent_status))
+        let Some((parent_thread_id, parent_status, purpose)) =
+            self.side_threads.get(&active_thread_id).map(|state| {
+                (
+                    state.parent_thread_id,
+                    state.parent_status,
+                    state.purpose.clone(),
+                )
+            })
         else {
             clear_side_ui(&mut self.chat_widget);
             if self
@@ -265,6 +540,9 @@ impl App {
         self.chat_widget
             .set_interrupted_turn_notice_mode(InterruptedTurnNoticeMode::Suppress);
         let mut label_parts = Vec::new();
+        if let Some(purpose) = purpose {
+            label_parts.push(format!("purpose: {purpose}"));
+        }
         let parent_is_main = self.primary_thread_id == Some(parent_thread_id);
         if parent_is_main {
             label_parts.push("from main thread".to_string());
@@ -416,6 +694,18 @@ impl App {
         app_server: &mut AppServerSession,
         thread_id: ThreadId,
     ) -> bool {
+        if let Some(request_id) = self
+            .side_threads
+            .get_mut(&thread_id)
+            .and_then(|state| state.pending_tool_request.take())
+        {
+            self.reject_side_tool_call(
+                app_server,
+                request_id,
+                format!("side conversation {thread_id} was closed before answering"),
+            )
+            .await;
+        }
         if let Err(message) = self.interrupt_side_thread(app_server, thread_id).await {
             tracing::warn!("{message}");
             self.chat_widget.add_error_message(message);
@@ -438,6 +728,18 @@ impl App {
         app_server: &mut AppServerSession,
         thread_id: ThreadId,
     ) {
+        if let Some(request_id) = self
+            .side_threads
+            .get_mut(&thread_id)
+            .and_then(|state| state.pending_tool_request.take())
+        {
+            self.reject_side_tool_call(
+                app_server,
+                request_id,
+                format!("side conversation {thread_id} was closed before answering"),
+            )
+            .await;
+        }
         let turn_id = self
             .active_turn_id_for_thread(thread_id)
             .await
@@ -659,6 +961,7 @@ impl App {
         app_server: &mut AppServerSession,
         parent_thread_id: ThreadId,
         mut user_message: Option<crate::chatwidget::UserMessage>,
+        telemetry_source: &'static str,
     ) -> Result<AppRunControl> {
         if let Some(message) = self.side_start_block_message() {
             self.restore_side_user_message(user_message.take());
@@ -679,7 +982,7 @@ impl App {
         self.session_telemetry.counter(
             "codex.thread.side",
             /*inc*/ 1,
-            &[("source", "slash_command")],
+            &[("source", telemetry_source)],
         );
         self.refresh_in_memory_config_from_disk_best_effort("starting a side conversation")
             .await;
@@ -766,5 +1069,167 @@ impl App {
         }
 
         Ok(AppRunControl::Continue)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn handle_side_tool_call(
+        &mut self,
+        tui: &mut tui::Tui,
+        app_server: &mut AppServerSession,
+        parent_thread_id: ThreadId,
+        request_id: AppServerRequestId,
+        purpose: String,
+        prompt: String,
+        reuse: bool,
+    ) -> Result<AppRunControl> {
+        if self.side_threads.contains_key(&parent_thread_id) {
+            self.reject_side_tool_call(
+                app_server,
+                request_id,
+                "side conversations cannot open nested side conversations".to_string(),
+            )
+            .await;
+            return Ok(AppRunControl::Continue);
+        }
+
+        let existing = self
+            .side_threads
+            .iter()
+            .find(|(_, state)| state.parent_thread_id == parent_thread_id)
+            .map(|(thread_id, state)| {
+                (
+                    *thread_id,
+                    state.purpose.clone(),
+                    state.pending_tool_request.is_some(),
+                )
+            });
+        if let Some((side_thread_id, _, _)) = existing.as_ref()
+            && self.side_threads.get(side_thread_id).is_some_and(|state| {
+                state.is_reusable_for(parent_thread_id, purpose.as_str(), reuse)
+            })
+        {
+            let side_thread_id = *side_thread_id;
+            if let Err(err) = self
+                .select_agent_thread(tui, app_server, side_thread_id)
+                .await
+            {
+                self.reject_side_tool_call(
+                    app_server,
+                    request_id,
+                    format!("failed to reopen side conversation {side_thread_id}: {err}"),
+                )
+                .await;
+                return Ok(AppRunControl::Continue);
+            }
+            let Some(user_message) = crate::chatwidget::create_initial_user_message(
+                Some(prompt),
+                Vec::new(),
+                Vec::new(),
+            ) else {
+                self.reject_side_tool_call(
+                    app_server,
+                    request_id,
+                    "side conversation prompt must not be empty".to_string(),
+                )
+                .await;
+                return Ok(AppRunControl::Continue);
+            };
+            let Some(state) = self.side_threads.get_mut(&side_thread_id) else {
+                self.reject_side_tool_call(
+                    app_server,
+                    request_id,
+                    format!("side conversation {side_thread_id} is no longer available"),
+                )
+                .await;
+                return Ok(AppRunControl::Continue);
+            };
+            state.pending_tool_request = Some(request_id);
+            let _ = self
+                .chat_widget
+                .submit_user_message_as_plain_user_turn(user_message);
+            return Ok(AppRunControl::Continue);
+        }
+
+        if let Some((_, existing_purpose, true)) = existing.as_ref()
+            && reuse
+            && existing_purpose.as_deref() == Some(purpose.as_str())
+        {
+            self.reject_side_tool_call(
+                app_server,
+                request_id,
+                "the matching side conversation is still answering its previous request"
+                    .to_string(),
+            )
+            .await;
+            return Ok(AppRunControl::Continue);
+        }
+
+        if let Some((side_thread_id, _, _)) = existing {
+            if self.active_thread_id == Some(side_thread_id)
+                && let Err(err) = self
+                    .select_agent_thread(tui, app_server, parent_thread_id)
+                    .await
+            {
+                self.reject_side_tool_call(
+                    app_server,
+                    request_id,
+                    format!("failed to return to side parent {parent_thread_id}: {err}"),
+                )
+                .await;
+                return Ok(AppRunControl::Continue);
+            }
+            if !self.discard_side_thread(app_server, side_thread_id).await {
+                self.reject_side_tool_call(
+                    app_server,
+                    request_id,
+                    format!("failed to replace side conversation {side_thread_id}"),
+                )
+                .await;
+                return Ok(AppRunControl::Continue);
+            }
+        }
+
+        let user_message =
+            crate::chatwidget::create_initial_user_message(Some(prompt), Vec::new(), Vec::new());
+        let control = match self
+            .handle_start_side(
+                tui,
+                app_server,
+                parent_thread_id,
+                user_message,
+                "dynamic_tool",
+            )
+            .await
+        {
+            Ok(control) => control,
+            Err(err) => {
+                self.reject_side_tool_call(
+                    app_server,
+                    request_id,
+                    format!("failed to open side conversation: {err}"),
+                )
+                .await;
+                return Err(err);
+            }
+        };
+        let child_thread_id = self
+            .side_threads
+            .iter()
+            .find(|(_, state)| state.parent_thread_id == parent_thread_id)
+            .map(|(thread_id, _)| *thread_id);
+        if let Some(child_thread_id) = child_thread_id {
+            if let Some(state) = self.side_threads.get_mut(&child_thread_id) {
+                state.purpose = Some(purpose);
+                state.pending_tool_request = Some(request_id);
+            }
+        } else {
+            self.reject_side_tool_call(
+                app_server,
+                request_id,
+                "failed to open side conversation".to_string(),
+            )
+            .await;
+        }
+        Ok(control)
     }
 }

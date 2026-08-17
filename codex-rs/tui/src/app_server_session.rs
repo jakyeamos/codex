@@ -32,6 +32,10 @@ use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ConfigBatchWriteParams;
 use codex_app_server_protocol::ConfigRequirementsReadResponse;
 use codex_app_server_protocol::ConfigWriteResponse;
+use codex_app_server_protocol::DynamicToolFunctionSpec;
+use codex_app_server_protocol::DynamicToolNamespaceSpec;
+use codex_app_server_protocol::DynamicToolNamespaceTool;
+use codex_app_server_protocol::DynamicToolSpec;
 use codex_app_server_protocol::ExternalAgentConfigDetectParams;
 use codex_app_server_protocol::ExternalAgentConfigDetectResponse;
 use codex_app_server_protocol::ExternalAgentConfigImportParams;
@@ -1725,8 +1729,55 @@ fn thread_start_params_from_config(
         developer_instructions: with_terminal_visualization_instructions(
             config, /*control_instructions*/ None,
         ),
+        dynamic_tools: Some(tui_dynamic_tools()),
         ..ThreadStartParams::default()
     }
+}
+
+fn tui_dynamic_tools() -> Vec<DynamicToolSpec> {
+    vec![DynamicToolSpec::Namespace(DynamicToolNamespaceSpec {
+        name: "side_conversation".to_string(),
+        description: concat!(
+            "Open or reuse a visible, ephemeral side conversation for a focused auxiliary ",
+            "question while preserving the main thread's task and context."
+        )
+        .to_string(),
+        tools: vec![DynamicToolNamespaceTool::Function(
+            DynamicToolFunctionSpec {
+                name: "ask".to_string(),
+                description: concat!(
+                    "Ask a purpose-bound side conversation and wait for its answer. Use this when ",
+                    "an auxiliary perspective, rubric, rating scale, critique, or bounded ",
+                    "exploration ",
+                    "would help without derailing the main thread. Reuse an existing side ",
+                    "conversation only when its purpose matches. Returns JSON with thread_id, ",
+                    "purpose, and response. Side conversations are non-mutating unless the user ",
+                    "explicitly authorizes a mutation there."
+                )
+                .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "purpose": {
+                            "type": "string",
+                            "description": "Stable purpose identifier, such as rating-scale or visual-critique."
+                        },
+                        "prompt": {
+                            "type": "string",
+                            "description": "The focused question to ask in the side conversation."
+                        },
+                        "reuse": {
+                            "type": "boolean",
+                            "description": "Reuse a currently open side conversation with the same purpose. Defaults to true."
+                        }
+                    },
+                    "required": ["purpose", "prompt"],
+                    "additionalProperties": false
+                }),
+                defer_loading: false,
+            },
+        )],
+    })]
 }
 
 fn thread_resume_params_from_config(
@@ -1764,6 +1815,7 @@ fn thread_resume_params_from_config(
     };
     ThreadResumeParams {
         thread_id: thread_id.to_string(),
+        dynamic_tools: Some(tui_dynamic_tools()),
         model,
         model_provider,
         service_tier: service_tier_override_from_config(&config),
@@ -2136,6 +2188,26 @@ mod tests {
             .build()
             .await
             .expect("config should build")
+    }
+
+    #[test]
+    fn tui_dynamic_tools_exposes_purpose_bound_side_conversations() {
+        let dynamic_tools = tui_dynamic_tools();
+        let [DynamicToolSpec::Namespace(namespace)] = dynamic_tools.as_slice() else {
+            panic!("expected one side-conversation namespace");
+        };
+        assert_eq!(namespace.name, "side_conversation");
+        let [DynamicToolNamespaceTool::Function(tool)] = namespace.tools.as_slice() else {
+            panic!("expected one side-conversation function");
+        };
+        assert_eq!(tool.name, "ask");
+        assert_eq!(
+            tool.input_schema["required"],
+            serde_json::json!(["purpose", "prompt"])
+        );
+        assert_eq!(tool.input_schema["additionalProperties"], false);
+        assert!(tool.description.contains("rating scale"));
+        assert!(tool.description.contains("Returns JSON with thread_id"));
     }
 
     fn rate_limit_snapshot(limit_id: &str) -> RateLimitSnapshot {

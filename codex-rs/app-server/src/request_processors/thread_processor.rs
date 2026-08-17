@@ -3154,6 +3154,7 @@ impl ThreadRequestProcessor {
 
         let ThreadResumeParams {
             thread_id,
+            dynamic_tools,
             history,
             path,
             model,
@@ -3173,6 +3174,15 @@ impl ThreadRequestProcessor {
             initial_turns_page,
         } = params;
         let include_turns = !exclude_turns;
+        if let Some(dynamic_tools) = dynamic_tools.as_ref()
+            && !dynamic_tools.is_empty()
+            && let Err(error) = validate_dynamic_tools(dynamic_tools)
+        {
+            self.outgoing
+                .send_error(request_id, invalid_request(error))
+                .await;
+            return Ok(());
+        }
 
         let resume_result = if let Some(history) = history {
             self.resume_thread_from_history(history.as_slice())
@@ -3282,12 +3292,13 @@ impl ThreadRequestProcessor {
 
         match self
             .thread_manager
-            .resume_thread_with_history(
+            .resume_thread_with_history_and_dynamic_tools(
                 config,
                 thread_history,
                 self.auth_manager.clone(),
                 self.request_trace_context(&request_id).await,
                 client_mcp_extensions,
+                dynamic_tools,
             )
             .await
         {

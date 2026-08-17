@@ -29,6 +29,7 @@ use codex_app_server_protocol::PluginMarketplaceEntry;
 use codex_app_server_protocol::PluginReadParams;
 use codex_app_server_protocol::PluginReadResponse;
 use codex_app_server_protocol::PluginUninstallResponse;
+use codex_app_server_protocol::RequestId as AppServerRequestId;
 use codex_app_server_protocol::SkillsListResponse;
 use codex_app_server_protocol::Thread;
 use codex_app_server_protocol::ThreadGoalStatus;
@@ -208,6 +209,15 @@ pub(crate) enum AppEvent {
     StartSide {
         parent_thread_id: ThreadId,
         user_message: Option<UserMessage>,
+    },
+
+    /// Open or reuse a purpose-bound side conversation on behalf of the model-facing tool.
+    AskSideConversation {
+        parent_thread_id: ThreadId,
+        request_id: AppServerRequestId,
+        purpose: String,
+        prompt: String,
+        reuse: bool,
     },
 
     /// Submit an op to the specified thread, regardless of current focus.

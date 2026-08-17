@@ -2175,7 +2175,32 @@ impl App {
                 user_message,
             } => {
                 return self
-                    .handle_start_side(tui, app_server, parent_thread_id, user_message)
+                    .handle_start_side(
+                        tui,
+                        app_server,
+                        parent_thread_id,
+                        user_message,
+                        "slash_command",
+                    )
+                    .await;
+            }
+            AppEvent::AskSideConversation {
+                parent_thread_id,
+                request_id,
+                purpose,
+                prompt,
+                reuse,
+            } => {
+                return self
+                    .handle_side_tool_call(
+                        tui,
+                        app_server,
+                        parent_thread_id,
+                        request_id,
+                        purpose,
+                        prompt,
+                        reuse,
+                    )
                     .await;
             }
             AppEvent::OpenSkillsList => {

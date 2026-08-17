@@ -48,6 +48,7 @@ mod queued_items;
 mod recovery;
 mod remote_control;
 mod rollout_migration;
+mod skill_invocations;
 #[cfg(test)]
 pub(crate) mod test_support;
 mod thread_section_order;
@@ -72,6 +73,9 @@ pub use recovery::runtime_db_path_for_corruption_error;
 pub use recovery::sqlite_error_detail_is_corruption;
 pub use recovery::sqlite_error_detail_is_lock;
 pub use remote_control::RemoteControlEnrollmentRecord;
+pub use skill_invocations::SkillInvocationRecord;
+pub use skill_invocations::SkillInvocationStatus;
+pub use skill_invocations::SkillInvocationType;
 pub use threads::ThreadFilterOptions;
 
 // "Partition" is the retained-log-content bucket we cap at 10 MiB:

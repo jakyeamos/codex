@@ -117,6 +117,8 @@ mod request_processors;
 mod request_serialization;
 mod server_request_error;
 mod skills_watcher;
+mod thread_setup_bridge;
+mod thread_setup_status;
 mod thread_state;
 mod thread_status;
 mod transport;
@@ -125,6 +127,9 @@ pub use crate::code_mode_host::AppServerCodeModeHostArgs;
 pub use crate::code_mode_host::CodeModeHostTransport;
 pub use crate::error_code::INPUT_TOO_LARGE_ERROR_CODE;
 pub use crate::error_code::INVALID_PARAMS_ERROR_CODE;
+pub use crate::thread_setup_bridge::ThreadSetupBridge;
+pub use crate::thread_setup_status::ThreadSetupStatusError;
+pub use crate::thread_setup_status::ThreadSetupStatusHandle;
 pub use crate::transport::AppServerTransport;
 pub use crate::transport::RemoteControlStartupMode;
 pub use crate::transport::app_server_control_socket_path;
@@ -879,6 +884,7 @@ pub async fn run_main_with_transport_options(
         info!("outbound router task exited (channel closed)");
     });
 
+    let thread_setup_status_registry = thread_setup_status::ThreadSetupStatusRegistry::new();
     let processor_handle = tokio::spawn({
         let auth_manager = Arc::clone(&auth_manager);
         let analytics_events_client =
@@ -907,6 +913,7 @@ pub async fn run_main_with_transport_options(
             rpc_transport: analytics_rpc_transport(&transport),
             remote_control_handle: Some(remote_control_handle.clone()),
             plugin_startup_tasks: runtime_options.plugin_startup_tasks,
+            thread_setup_status: thread_setup_status_registry,
         }));
         let mut thread_created_rx = processor.thread_created_receiver();
         let mut running_turn_count_rx = processor.subscribe_running_assistant_turn_count();

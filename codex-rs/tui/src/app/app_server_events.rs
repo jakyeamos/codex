@@ -15,6 +15,7 @@ use codex_app_server_protocol::AuthMode;
 use codex_app_server_protocol::RateLimitReachedType;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
+use codex_protocol::ThreadId;
 
 impl App {
     pub(super) fn refresh_mcp_startup_expected_servers_from_config(&mut self) {
@@ -80,6 +81,10 @@ impl App {
         app_server_client: &AppServerSession,
         notification: ServerNotification,
     ) {
+        if let ServerNotification::TurnCompleted(turn_completed) = &notification {
+            self.maybe_resolve_side_tool_turn(app_server_client, turn_completed)
+                .await;
+        }
         match &notification {
             ServerNotification::ServerRequestResolved(notification) => {
                 if let Some(request) = self
@@ -211,6 +216,35 @@ impl App {
         app_server_client: &AppServerSession,
         request: ServerRequest,
     ) {
+        if let ServerRequest::DynamicToolCall { request_id, params } = &request
+            && let Some(arguments) = Self::parse_side_tool_call(params)
+        {
+            let parent_thread_id = ThreadId::from_string(&params.thread_id);
+            match (parent_thread_id, arguments) {
+                (Ok(parent_thread_id), Ok(arguments)) => {
+                    self.app_event_tx.send(AppEvent::AskSideConversation {
+                        parent_thread_id,
+                        request_id: request_id.clone(),
+                        purpose: arguments.purpose,
+                        prompt: arguments.prompt,
+                        reuse: arguments.reuse,
+                    });
+                }
+                (Err(err), _) => {
+                    self.reject_side_tool_call(
+                        app_server_client,
+                        request_id.clone(),
+                        format!("invalid side-conversation parent thread: {err}"),
+                    )
+                    .await;
+                }
+                (_, Err(message)) => {
+                    self.reject_side_tool_call(app_server_client, request_id.clone(), message)
+                        .await;
+                }
+            }
+            return;
+        }
         let thread_id = server_request_thread_id(&request);
         if thread_id.is_some_and(|thread_id| self.abandoned_side_threads.contains(&thread_id)) {
             if let Err(err) = self

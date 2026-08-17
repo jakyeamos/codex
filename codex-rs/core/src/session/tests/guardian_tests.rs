@@ -775,6 +775,7 @@ async fn guardian_subagent_does_not_inherit_parent_exec_policy_rules() {
         originator: "test_originator".to_string(),
         agent_control: AgentControl::default(),
         dynamic_tools: Vec::new(),
+        restore_dynamic_tools_from_history: true,
         metrics_service_name: None,
         inherited_environments: None,
         inherited_exec_policy: Some(Arc::new(parent_exec_policy)),

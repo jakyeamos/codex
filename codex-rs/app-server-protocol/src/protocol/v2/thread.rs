@@ -325,6 +325,15 @@ pub struct ThreadSettingsUpdatedNotification {
 pub struct ThreadResumeParams {
     pub thread_id: String,
 
+    /// Replace dynamic tools for the resumed thread. Omit to restore tools from rollout metadata.
+    #[experimental("thread/resume.dynamicTools")]
+    #[serde(
+        default,
+        deserialize_with = "codex_protocol::dynamic_tools::deserialize_dynamic_tool_specs"
+    )]
+    #[ts(optional = nullable)]
+    pub dynamic_tools: Option<Vec<DynamicToolSpec>>,
+
     /// [UNSTABLE] FOR CODEX CLOUD - DO NOT USE.
     /// If specified, the thread will be resumed with the provided history
     /// instead of loaded from disk.

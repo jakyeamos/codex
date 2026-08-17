@@ -40,6 +40,8 @@ use codex_skills_extension::provider::SkillListQuery;
 use codex_skills_extension::provider::SkillProviderFuture;
 use codex_skills_extension::provider::SkillReadRequest;
 use codex_skills_extension::provider::SkillSearchRequest;
+use codex_state::SkillInvocationStatus;
+use codex_state::SkillInvocationType;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
 use codex_utils_string::approx_token_count;
@@ -1837,6 +1839,32 @@ async fn production_turn_warns_and_omits_unreadable_host_skill() -> Result<()> {
             "<skill>\n<name>available-host</name>\n<path>{}</path>\n{available_skill_contents}\n</skill>",
             available_skill_path.display()
         )]
+    );
+
+    let mut persisted = test
+        .codex
+        .state_db()
+        .expect("state db enabled")
+        .skill_invocation_records()
+        .await?
+        .into_iter()
+        .map(|record| (record.skill_name, record.invocation_type, record.status))
+        .collect::<Vec<_>>();
+    persisted.sort_by(|left, right| left.0.cmp(&right.0));
+    assert_eq!(
+        persisted,
+        vec![
+            (
+                "available-host".to_string(),
+                SkillInvocationType::Explicit,
+                SkillInvocationStatus::Ok,
+            ),
+            (
+                "missing-host".to_string(),
+                SkillInvocationType::Explicit,
+                SkillInvocationStatus::Error,
+            ),
+        ]
     );
 
     Ok(())

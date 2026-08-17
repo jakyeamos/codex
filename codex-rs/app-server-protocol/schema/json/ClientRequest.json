@@ -4715,6 +4715,18 @@
       ],
       "type": "object"
     },
+    "ThreadSetupStatusReadParams": {
+      "description": "Parameters for reading one connection-scoped asynchronous thread setup handle.",
+      "properties": {
+        "clientThreadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "clientThreadId"
+      ],
+      "type": "object"
+    },
     "ThreadShellCommandParams": {
       "properties": {
         "command": {
@@ -5377,6 +5389,30 @@
         "params"
       ],
       "title": "Thread/startRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "thread/setupStatus/read"
+          ],
+          "title": "Thread/setupStatus/readRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ThreadSetupStatusReadParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Thread/setupStatus/readRequest",
       "type": "object"
     },
     {

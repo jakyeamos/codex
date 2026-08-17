@@ -212,6 +212,7 @@ pub struct StartThreadOptions {
     pub session_source: Option<SessionSource>,
     pub thread_source: Option<ThreadSource>,
     pub dynamic_tools: Vec<codex_protocol::dynamic_tools::DynamicToolSpec>,
+    pub restore_dynamic_tools_from_history: bool,
     pub metrics_service_name: Option<String>,
     pub parent_trace: Option<W3cTraceContext>,
     pub environments: Option<Vec<TurnEnvironmentSelection>>,
@@ -229,6 +230,7 @@ impl StartThreadOptions {
             session_source: None,
             thread_source: None,
             dynamic_tools: Vec::new(),
+            restore_dynamic_tools_from_history: true,
             metrics_service_name: None,
             parent_trace: None,
             environments: None,
@@ -934,6 +936,27 @@ impl ThreadManager {
         parent_trace: Option<W3cTraceContext>,
         client_mcp_extensions: ClientMcpExtensions,
     ) -> CodexResult<NewThread> {
+        self.resume_thread_with_history_and_dynamic_tools(
+            config,
+            initial_history,
+            auth_manager,
+            parent_trace,
+            client_mcp_extensions,
+            None,
+        )
+        .await
+    }
+
+    #[instrument(level = "trace", skip_all)]
+    pub async fn resume_thread_with_history_and_dynamic_tools(
+        &self,
+        config: Config,
+        initial_history: InitialHistory,
+        auth_manager: Arc<AuthManager>,
+        parent_trace: Option<W3cTraceContext>,
+        client_mcp_extensions: ClientMcpExtensions,
+        dynamic_tools: Option<Vec<codex_protocol::dynamic_tools::DynamicToolSpec>>,
+    ) -> CodexResult<NewThread> {
         let agent_control = self.agent_control_for_config(&config);
         let (session_source, thread_source) = initial_history
             .get_resumed_session_sources()
@@ -946,10 +969,13 @@ impl ThreadManager {
                 .restore_v2_agent_metadata(&config, resumed.conversation_id)
                 .await;
         }
+        let restore_dynamic_tools_from_history = dynamic_tools.is_none();
         let options = StartThreadOptions {
             initial_history,
             session_source: Some(session_source),
             thread_source,
+            dynamic_tools: dynamic_tools.unwrap_or_default(),
+            restore_dynamic_tools_from_history,
             parent_trace,
             client_mcp_extensions,
             ..StartThreadOptions::new(config)
@@ -1670,6 +1696,7 @@ impl ThreadManagerState {
             session_source,
             thread_source,
             dynamic_tools,
+            restore_dynamic_tools_from_history,
             metrics_service_name,
             parent_trace,
             environments,
@@ -1762,6 +1789,7 @@ impl ThreadManagerState {
             originator,
             agent_control,
             dynamic_tools,
+            restore_dynamic_tools_from_history,
             metrics_service_name,
             inherited_environments,
             inherited_exec_policy,

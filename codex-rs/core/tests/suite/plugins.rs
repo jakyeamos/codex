@@ -24,6 +24,8 @@ use codex_protocol::protocol::Op;
 use codex_protocol::user_input::UserInput;
 use codex_skills_extension::SkillsExtensionConfig;
 use codex_skills_extension::install;
+use codex_state::SkillInvocationStatus;
+use codex_state::SkillInvocationType;
 use core_test_support::apps_test_server::AppsTestServer;
 use core_test_support::apps_test_server::SEARCH_CALENDAR_CREATE_TOOL;
 use core_test_support::responses::ResponseMock;
@@ -1496,6 +1498,18 @@ async fn implicit_plugin_skill_invocation_tracks_remote_plugin_id(
         SAMPLE_REMOTE_PLUGIN_ID
     );
     assert_eq!(event["event_params"]["invoke_type"], "implicit");
+
+    let persisted = test_codex
+        .codex
+        .state_db()
+        .expect("state db enabled")
+        .skill_invocation_records()
+        .await?;
+    assert!(persisted.iter().any(|record| {
+        record.invocation_type == SkillInvocationType::Implicit
+            && record.status == SkillInvocationStatus::Ok
+            && record.skill_path == skill_path
+    }));
 
     Ok(())
 }
