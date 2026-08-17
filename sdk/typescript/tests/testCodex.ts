@@ -23,6 +23,9 @@ export type TestClient = {
 export function createMockClient(url: string): TestClient {
   return createTestClient({
     config: {
+      // Keep SDK fixtures on a direct-tool model; the repository's default
+      // model requires the separately packaged Code Mode host.
+      model: "gpt-5.5",
       model_provider: "mock",
       model_providers: {
         mock: {
@@ -77,12 +80,16 @@ function mergeTestConfig(
 
   return {
     ...mergedConfig,
-    // Disable plugins in SDK integration tests so background curated-plugin
-    // sync does not race temp CODEX_HOME cleanup.
+    // Disable integrations that require external host state in SDK
+    // integration tests. These tests use a temporary CODEX_HOME and do not
+    // exercise plugins, Code Mode, or automatic host-skill rendering.
     features:
       featureOverrides && typeof featureOverrides === "object" && !Array.isArray(featureOverrides)
-        ? { ...featureOverrides, plugins: false }
-        : { plugins: false },
+        ? { ...featureOverrides, plugins: false, code_mode: false, code_mode_host: false }
+        : { plugins: false, code_mode: false, code_mode_host: false },
+    skills: {
+      include_instructions: false,
+    },
   };
 }
 
