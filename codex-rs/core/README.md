@@ -2,6 +2,24 @@
 
 This crate implements the business logic for Codex. It is designed to be used by the various Codex UIs written in Rust.
 
+## Mac Control authorization bridge
+
+On macOS, the `unified_exec` per-command boundary has an optional, fail-open bridge to the
+local Mac Control daemon. It classifies the already-parsed command before sandbox/process
+launch, prepares a short-lived explanatory notice for credential-, Keychain-, or
+permission-capable commands, binds the notice after a process is created, and resolves it on
+success or failure. Dropped command futures attempt a best-effort `cancelled` resolution; the
+daemon's expiry remains authoritative.
+
+The bridge sends only bounded labels and an allowlisted `codex://thread/...` source reference.
+It never sends raw command text, arguments, prompt bodies, passwords, tokens, private input,
+environment values, output, or native Allow/Deny decisions. The child `macctl` invocation
+clears inherited environment variables and is limited by a short timeout. If Mac Control is
+unavailable or the notice call fails, the command continues and any native macOS prompt remains
+an ordinary user decision without trusted provenance. `attested` provenance describes only the
+local helper/socket correlation; it is not a safety or approval claim. External unannounced
+dialogs remain unverified.
+
 ## Wine-exec integration tests
 
 On x86-64 Linux, run the shared suite against the Windows exec server with

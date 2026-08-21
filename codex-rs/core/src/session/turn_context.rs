@@ -1,6 +1,7 @@
 use super::*;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::exec_policy::AllowPrefixRules;
+use crate::session::skill_telemetry::SkillReadTelemetry;
 use crate::shell_snapshot::ShellSnapshotFile;
 use codex_core_plugins::PluginCommandAttribution;
 use codex_core_plugins::TrustedPluginRoots;
@@ -584,6 +585,7 @@ impl Session {
         let (current_date, timezone) = local_time_context();
         let extension_data = Arc::new(codex_extension_api::ExtensionData::new(sub_id.clone()));
         extension_data.insert(skills_snapshot);
+        extension_data.insert(SkillReadTelemetry::default());
         TurnContext {
             sub_id,
             trace_id: current_span_trace_id(),

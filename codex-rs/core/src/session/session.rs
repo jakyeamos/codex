@@ -562,6 +562,16 @@ impl Session {
         self.thread_id
     }
 
+    /// Returns the current user-facing title for this thread, when one is set.
+    pub(crate) async fn thread_name(&self) -> Option<String> {
+        self.state
+            .lock()
+            .await
+            .session_configuration
+            .thread_name
+            .clone()
+    }
+
     /// Returns the identity shared by the root thread and all descendant threads.
     pub(crate) fn session_id(&self) -> SessionId {
         self.services.agent_control.session_id()

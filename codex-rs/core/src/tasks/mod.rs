@@ -29,6 +29,8 @@ use crate::config::Config;
 use crate::context::ContextualUserFragment;
 use crate::session::TurnInput;
 use crate::session::session::Session;
+use crate::session::skill_telemetry::CODEX_TMCP_HOST_OBSERVATION_SCHEMA;
+use crate::session::skill_telemetry::SkillReadTelemetry;
 use crate::session::turn::run_hooks_and_record_inputs;
 use crate::session::turn_context::TurnContext;
 use crate::state::ActiveTurn;
@@ -44,7 +46,10 @@ use codex_otel::TURN_TOKEN_USAGE_METRIC;
 use codex_otel::TURN_TOOL_CALL_METRIC;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::HostObservationItem;
+use codex_protocol::protocol::HostObservationMetrics;
 use codex_protocol::protocol::MultiAgentVersion;
+use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnAbortedEvent;
@@ -809,7 +814,25 @@ impl Session {
                 time_to_first_token_ms,
             })
         };
-        self.send_event(turn_context.as_ref(), event).await;
+        let host_observation = turn_context
+            .extension_data
+            .get::<SkillReadTelemetry>()
+            .expect("every turn has skill read telemetry")
+            .host_observation_metrics()
+            .map(|skill_read_metrics| {
+                RolloutItem::HostObservation(HostObservationItem {
+                    schema: CODEX_TMCP_HOST_OBSERVATION_SCHEMA.to_string(),
+                    session_id: self.thread_id.to_string(),
+                    turn_id: turn_context.sub_id.clone(),
+                    host_metrics: HostObservationMetrics {
+                        skill_read_calls: skill_read_metrics.skill_read_calls,
+                        skill_read_input_tokens: skill_read_metrics.skill_read_input_tokens,
+                    },
+                })
+            });
+        let additional_rollout_items: &[RolloutItem] = host_observation.as_slice();
+        self.send_event_with_rollout_items(turn_context.as_ref(), event, additional_rollout_items)
+            .await;
         self.services
             .guardian_rejection_circuit_breaker
             .lock()

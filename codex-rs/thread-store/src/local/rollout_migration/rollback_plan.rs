@@ -218,6 +218,9 @@ impl RollbackPlanner {
                 }
             }
             RolloutItem::WorldState(_) => {}
+            RolloutItem::HostObservation(observation) => {
+                self.assign_targeted_record(index, Some(observation.turn_id.as_str()));
+            }
         }
 
         Ok(())

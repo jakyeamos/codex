@@ -75,7 +75,8 @@ impl ModelReplayPlanner {
             | RolloutItem::ResponseItem(_)
             | RolloutItem::EventMsg(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
-            | RolloutItem::WorldState(_) => return,
+            | RolloutItem::WorldState(_)
+            | RolloutItem::HostObservation(_) => return,
         };
         self.records.push(record);
     }

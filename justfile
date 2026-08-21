@@ -48,6 +48,10 @@ fmt:
 fmt-check:
     @{{ python }} ../scripts/format.py --check
 
+# Verify the required helper commands before editing or running validation.
+preflight:
+    @{{ python }} ../scripts/preflight.py
+
 fix *args:
     cargo clippy --fix --tests --allow-dirty {args}
 

@@ -2027,7 +2027,8 @@ async fn resume_candidate_matches_cwd(
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::Compacted(_)
             | RolloutItem::WorldState(_)
-            | RolloutItem::EventMsg(_) => None,
+            | RolloutItem::EventMsg(_)
+            | RolloutItem::HostObservation(_) => None,
         })
     {
         return cwd_matches(latest_turn_context_cwd.as_path(), cwd);

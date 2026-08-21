@@ -39,6 +39,7 @@ use crate::unified_exec::MAX_UNIFIED_EXEC_PROCESSES;
 use crate::unified_exec::MAX_YIELD_TIME_MS;
 use crate::unified_exec::MIN_EMPTY_YIELD_TIME_MS;
 use crate::unified_exec::MIN_YIELD_TIME_MS;
+use crate::unified_exec::MacControlAuthorizationLifecycle;
 use crate::unified_exec::ProcessEntry;
 use crate::unified_exec::ProcessStore;
 use crate::unified_exec::UnifiedExecContext;
@@ -424,6 +425,20 @@ impl UnifiedExecProcessManager {
         request: ExecCommandRequest,
         context: &UnifiedExecContext,
     ) -> Result<ExecCommandToolOutput, UnifiedExecError> {
+        let mut authorization = MacControlAuthorizationLifecycle::prepare(&request, context).await;
+        let result = self
+            .exec_command_inner(request, context, &authorization)
+            .await;
+        authorization.resolve_for_result(result.is_ok()).await;
+        result
+    }
+
+    async fn exec_command_inner(
+        &self,
+        request: ExecCommandRequest,
+        context: &UnifiedExecContext,
+        authorization: &MacControlAuthorizationLifecycle,
+    ) -> Result<ExecCommandToolOutput, UnifiedExecError> {
         let cwd = request.cwd.clone();
         let process = self
             .open_session_with_sandbox(&request, cwd.clone(), context)
@@ -438,6 +453,7 @@ impl UnifiedExecProcessManager {
                 return Err(err);
             }
         };
+        authorization.bind(request.process_id).await;
         let network_denial_monitor = deferred_network_approval.as_ref().map(|deferred| {
             terminate_process_on_network_denial(
                 Arc::clone(&process),
