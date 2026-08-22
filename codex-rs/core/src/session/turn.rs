@@ -761,6 +761,7 @@ impl TurnInjectionItem {
         session_id: &str,
         turn_id: &str,
         canonical_path: &str,
+        contents: &str,
         mut response_item: ResponseItem,
     ) -> Self {
         if response_item.id().is_none() {
@@ -770,6 +771,7 @@ impl TurnInjectionItem {
             session_id,
             turn_id,
             canonical_path,
+            contents,
             response_item.clone(),
         ));
         Self {
@@ -847,6 +849,7 @@ async fn build_skills_and_plugins(
     let HostSkillPrompts {
         fragments,
         injected: injected_host_skills,
+        injected_contents: injected_host_skill_contents,
         warnings: host_skill_warnings,
     } = skills_snapshot.load_skill_prompts(&mentioned_skills).await;
     emit_explicit_skill_invocations(
@@ -906,7 +909,8 @@ async fn build_skills_and_plugins(
     let mut injection_items = skill_items
         .into_iter()
         .zip(injected_host_skills.iter())
-        .filter_map(|(item, skill)| {
+        .zip(injected_host_skill_contents.iter())
+        .filter_map(|((item, skill), contents)| {
             if injected_host_skill_prompts.as_ref().is_some_and(|prompts| {
                 prompts.contains_path(&skill.path_to_skills_md.to_string_lossy())
             }) {
@@ -917,6 +921,7 @@ async fn build_skills_and_plugins(
                 &session_id,
                 &turn_context.sub_id,
                 &canonical_path,
+                contents,
                 item,
             ))
         })

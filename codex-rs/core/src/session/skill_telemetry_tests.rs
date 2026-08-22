@@ -46,7 +46,7 @@ fn record_exact(
     input: Vec<ResponseItem>,
     input_tokens: Vec<u64>,
 ) {
-    let attribution = exact_attribution(&input, &input_tokens);
+    let attribution = exact_attribution(&input, &input_tokens, session_id, turn_id);
     telemetry
         .record_successful_provider_request(
             session_id,
@@ -56,43 +56,50 @@ fn record_exact(
         .expect("exact provider attribution should be accepted");
 }
 
-fn exact_attribution(input: &[ResponseItem], input_tokens: &[u64]) -> ProviderRequestAttribution {
+fn exact_attribution(
+    input: &[ResponseItem],
+    input_tokens: &[u64],
+    session_id: &str,
+    turn_id: &str,
+) -> ProviderRequestAttribution {
     let authoritative_input_tokens = input_tokens.iter().sum();
-    let model = "test-model".to_string();
-    let response_id = "test-response".to_string();
-    let request_fingerprint = "test-request-fingerprint".to_string();
+    let requested_model = "test-model".to_string();
+    let receipt = ProviderTerminalAttributionReceipt {
+        session_id: session_id.to_string(),
+        turn_id: turn_id.to_string(),
+        response_id: "response-1".to_string(),
+        request_fingerprint: "sha256:request-v1:test".to_string(),
+        requested_model: requested_model.clone(),
+        resolved_model: requested_model.clone(),
+        requested_model_fingerprint: provider_model_fingerprint(&requested_model),
+        resolved_model_fingerprint: provider_model_fingerprint(&requested_model),
+        provider_transformation_version: "provider-transform-v1".to_string(),
+        tokenizer_accounting_version: "tokenizer-accounting-v1".to_string(),
+        input_items: input
+            .iter()
+            .zip(input_tokens)
+            .map(|(item, input_tokens)| ProviderTerminalInputItem {
+                item_id: item
+                    .id()
+                    .expect("exact test input should have an item id")
+                    .to_string(),
+                input_tokens: *input_tokens,
+            })
+            .collect(),
+        authoritative_input_tokens,
+    };
     ProviderRequestAttribution::ExactTerminalReceipt(ProviderTerminalAttribution {
-        receipt: ProviderTerminalAttributionReceipt {
-            session_id: "session".to_string(),
-            turn_id: "turn".to_string(),
-            response_id: response_id.clone(),
-            request_fingerprint: request_fingerprint.clone(),
-            requested_model: model.clone(),
-            resolved_model: model.clone(),
-            requested_model_fingerprint: provider_model_fingerprint(&model),
-            resolved_model_fingerprint: provider_model_fingerprint(&model),
-            provider_transformation_version: "test-provider-v1".to_string(),
-            tokenizer_accounting_version: "test-tokenizer-v1".to_string(),
-            input_items: input
-                .iter()
-                .zip(input_tokens.iter().copied())
-                .map(|(item, input_tokens)| ProviderTerminalInputItem {
-                    item_id: item.id().expect("test input item ID").to_string(),
-                    input_tokens,
-                })
-                .collect(),
-            authoritative_input_tokens,
-        },
+        receipt,
         terminal: ProviderTerminalResponse {
-            session_id: Some("session".to_string()),
-            turn_id: Some("turn".to_string()),
-            response_id,
-            requested_model: model.clone(),
-            resolved_model: Some(model),
+            session_id: Some(session_id.to_string()),
+            turn_id: Some(turn_id.to_string()),
+            response_id: "response-1".to_string(),
+            requested_model,
+            resolved_model: Some("test-model".to_string()),
             authoritative_input_tokens: Some(authoritative_input_tokens),
             successful: true,
         },
-        final_request_fingerprint: request_fingerprint,
+        final_request_fingerprint: "sha256:request-v1:test".to_string(),
     })
 }
 
@@ -169,7 +176,24 @@ fn duplicate_injection_and_request_retry_count_once_by_identity() {
         vec![first.clone(), second],
         vec![11, 13],
     );
-    record_exact(&telemetry, "session", "turn", vec![first], vec![11]);
+    let mut retry = match exact_attribution(&[first.clone()], &[11], "session", "turn") {
+        ProviderRequestAttribution::ExactTerminalReceipt(attribution) => attribution,
+        _ => panic!("test helper must create an exact terminal attribution"),
+    };
+    retry.receipt.response_id = "response-retry".to_string();
+    retry.receipt.request_fingerprint = "sha256:request-v1:retry".to_string();
+    retry.terminal.response_id = "response-retry".to_string();
+    retry.final_request_fingerprint = "sha256:request-v1:retry".to_string();
+    telemetry
+        .record_successful_provider_request(
+            "session",
+            "turn",
+            SkillReadProviderRequest {
+                input: vec![first],
+                attribution: ProviderRequestAttribution::ExactTerminalReceipt(retry),
+            },
+        )
+        .expect("a successful retry should remain exact");
 
     assert_eq!(telemetry.metrics().skill_read_calls, 1);
 }
@@ -215,7 +239,7 @@ fn mismatched_session_or_turn_does_not_count_or_poison_candidate() {
 }
 
 #[test]
-fn failed_truncated_filtered_and_extension_suppressed_items_count_zero() {
+fn failed_truncated_filtered_and_extension_suppressed_items_withhold_observation() {
     let telemetry = SkillReadTelemetry::default();
     let complete = skill_item("complete", "complete body");
     let filtered = skill_item("filtered", "filtered body");
@@ -255,11 +279,8 @@ fn failed_truncated_filtered_and_extension_suppressed_items_count_zero() {
         vec![29, 31],
     );
     assert_eq!(telemetry.metrics(), SkillReadMetrics::default());
-    assert_eq!(telemetry.outcome(), SkillReadTelemetryOutcome::CompleteZero);
-    assert_eq!(
-        telemetry.host_observation_metrics(),
-        Some(SkillReadMetrics::default())
-    );
+    assert_eq!(telemetry.outcome(), SkillReadTelemetryOutcome::Unavailable);
+    assert_eq!(telemetry.host_observation_metrics(), None);
 }
 
 #[test]
@@ -341,7 +362,47 @@ fn provider_without_exact_attribution_fails_closed() {
 }
 
 #[test]
-fn wrong_item_count_with_a_surviving_skill_withholds_observation() {
+fn aggregate_only_provider_attribution_fails_closed() {
+    let telemetry = SkillReadTelemetry::default();
+    let item = skill_item("aggregate-only", "provider aggregate only");
+    telemetry.register(provenance(
+        "session",
+        "turn",
+        "/skills/aggregate-only/SKILL.md",
+        "sha1:aggregate-only",
+        item.clone(),
+    ));
+
+    let error = telemetry
+        .record_successful_provider_request(
+            "session",
+            "turn",
+            SkillReadProviderRequest {
+                input: vec![item],
+                attribution: ProviderRequestAttribution::Unavailable(
+                    ProviderRequestAttributionError::ProviderReportsAggregateOnly {
+                        provider: "test-provider".to_string(),
+                        input_tokens: 23,
+                    },
+                ),
+            },
+        )
+        .expect_err("aggregate-only attribution must fail closed");
+
+    assert_eq!(
+        error,
+        ProviderRequestAttributionError::ProviderReportsAggregateOnly {
+            provider: "test-provider".to_string(),
+            input_tokens: 23,
+        }
+    );
+    assert_eq!(telemetry.metrics(), SkillReadMetrics::default());
+    assert_eq!(telemetry.outcome(), SkillReadTelemetryOutcome::Unavailable);
+    assert_eq!(telemetry.host_observation_metrics(), None);
+}
+
+#[test]
+fn missing_receipt_item_id_with_a_surviving_skill_withholds_observation() {
     let telemetry = SkillReadTelemetry::default();
     let item = skill_item("wrong-count", "body");
     telemetry.register(provenance(
@@ -352,25 +413,111 @@ fn wrong_item_count_with_a_surviving_skill_withholds_observation() {
         item.clone(),
     ));
 
+    let mut attribution = match exact_attribution(&[item.clone()], &[7], "session", "turn") {
+        ProviderRequestAttribution::ExactTerminalReceipt(attribution) => attribution,
+        _ => panic!("test helper must create an exact terminal attribution"),
+    };
+    attribution.receipt.input_items.clear();
     let error = telemetry
         .record_successful_provider_request(
             "session",
             "turn",
             SkillReadProviderRequest {
-                input: vec![item.clone()],
-                attribution: exact_attribution(&[item.clone()], &[]),
+                input: vec![item],
+                attribution: ProviderRequestAttribution::ExactTerminalReceipt(attribution),
             },
         )
-        .expect_err("wrong item count must fail closed");
+        .expect_err("missing receipt item id must fail closed");
 
     assert_eq!(
         error,
         ProviderRequestAttributionError::MissingReceiptInputItemId {
-            item_id: item.id().expect("item ID").to_string(),
+            item_id: "msg_wrong-count".to_string(),
         }
     );
     assert_eq!(telemetry.outcome(), SkillReadTelemetryOutcome::Unavailable);
     assert_eq!(telemetry.host_observation_metrics(), None);
+}
+
+fn assert_receipt_rejected<F>(suffix: &str, mutate: F)
+where
+    F: FnOnce(&mut ProviderTerminalAttribution),
+{
+    let telemetry = SkillReadTelemetry::default();
+    let item = skill_item(suffix, "body");
+    telemetry.register(provenance(
+        "session",
+        "turn",
+        "/skills/rejected/SKILL.md",
+        "sha1:rejected",
+        item.clone(),
+    ));
+    let mut attribution = match exact_attribution(&[item.clone()], &[7], "session", "turn") {
+        ProviderRequestAttribution::ExactTerminalReceipt(attribution) => attribution,
+        _ => panic!("test helper must create an exact terminal attribution"),
+    };
+    mutate(&mut attribution);
+
+    assert!(
+        telemetry
+            .record_successful_provider_request(
+                "session",
+                "turn",
+                SkillReadProviderRequest {
+                    input: vec![item],
+                    attribution: ProviderRequestAttribution::ExactTerminalReceipt(attribution),
+                },
+            )
+            .is_err()
+    );
+    assert_eq!(telemetry.outcome(), SkillReadTelemetryOutcome::Unavailable);
+    assert_eq!(telemetry.host_observation_metrics(), None);
+}
+
+#[test]
+fn duplicate_and_extra_receipt_item_ids_withhold_observation() {
+    assert_receipt_rejected("duplicate-receipt-id", |attribution| {
+        let item = attribution.receipt.input_items[0].clone();
+        attribution.receipt.input_items.push(item);
+    });
+    assert_receipt_rejected("extra-receipt-id", |attribution| {
+        attribution
+            .receipt
+            .input_items
+            .push(ProviderTerminalInputItem {
+                item_id: "extra-item".to_string(),
+                input_tokens: 0,
+            });
+    });
+}
+
+#[test]
+fn request_model_session_and_turn_mismatches_withhold_observation() {
+    assert_receipt_rejected("request-fingerprint-mismatch", |attribution| {
+        attribution.receipt.request_fingerprint = "sha256:request-v1:other".to_string();
+    });
+    assert_receipt_rejected("model-mismatch", |attribution| {
+        attribution.receipt.requested_model = "other-model".to_string();
+    });
+    assert_receipt_rejected("session-mismatch", |attribution| {
+        attribution.receipt.session_id = "other-session".to_string();
+    });
+    assert_receipt_rejected("turn-mismatch", |attribution| {
+        attribution.receipt.turn_id = "other-turn".to_string();
+    });
+}
+
+#[test]
+fn missing_receipt_versions_and_aggregate_mismatch_withhold_observation() {
+    assert_receipt_rejected("missing-transformation-version", |attribution| {
+        attribution.receipt.provider_transformation_version.clear();
+    });
+    assert_receipt_rejected("missing-tokenizer-version", |attribution| {
+        attribution.receipt.tokenizer_accounting_version.clear();
+    });
+    assert_receipt_rejected("aggregate-mismatch", |attribution| {
+        attribution.receipt.input_items[0].input_tokens = 6;
+    });
 }
 
 #[test]

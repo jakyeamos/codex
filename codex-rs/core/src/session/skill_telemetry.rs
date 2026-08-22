@@ -5,6 +5,8 @@ use std::sync::PoisonError;
 
 use codex_api::ProviderRequestAttribution;
 use codex_api::ProviderRequestAttributionError;
+use codex_api::ProviderTerminalAttribution;
+use codex_api::provider_model_fingerprint;
 use codex_protocol::ResponseItemId;
 use codex_protocol::models::ResponseItem;
 use sha1::Digest;
@@ -47,6 +49,7 @@ impl SkillReadProvenance {
         session_id: &str,
         turn_id: &str,
         canonical_path: &str,
+        contents: &str,
         response_item: ResponseItem,
     ) -> Self {
         let response_item_id = response_item
@@ -57,10 +60,7 @@ impl SkillReadProvenance {
             session_id: session_id.to_string(),
             turn_id: turn_id.to_string(),
             canonical_path: canonical_path.to_string(),
-            // The current host skill loader exposes the model-visible fragment and its
-            // canonical path, but not the raw file body at this boundary. Digest the exact
-            // response item that was registered so truncation/substitution remains detectable.
-            content_digest: response_item_digest(&response_item),
+            content_digest: content_digest(contents),
             response_item_id,
             expected_item: response_item,
         }
@@ -98,6 +98,7 @@ pub(crate) struct SkillReadTelemetry {
 struct SkillReadTelemetryState {
     candidates: HashMap<ResponseItemId, SkillReadProvenance>,
     counted: HashSet<SkillReadKey>,
+    accepted_receipt_key: Option<SkillReadReceiptKey>,
     metrics: SkillReadMetrics,
     outcome: SkillReadTelemetryOutcome,
     successful_request_recorded: bool,
@@ -111,12 +112,21 @@ struct SkillReadKey {
     content_digest: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SkillReadReceiptKey {
+    session_id: String,
+    turn_id: String,
+    response_id: String,
+    request_fingerprint: String,
+}
+
 impl SkillReadTelemetry {
     pub(crate) fn register(&self, provenance: SkillReadProvenance) {
         let mut state = self.state();
         state
             .candidates
             .insert(provenance.response_item_id.clone(), provenance);
+        state.accepted_receipt_key = None;
         state.successful_request_recorded = false;
     }
 
@@ -134,9 +144,8 @@ impl SkillReadTelemetry {
     ) -> Result<(), ProviderRequestAttributionError> {
         let SkillReadProviderRequest { input, attribution } = request;
         let mut state = self.state();
-        state.metrics = SkillReadMetrics::default();
-        state.counted.clear();
         state.successful_request_recorded = true;
+        let has_registered_candidate = !state.candidates.is_empty();
 
         let has_surviving_candidate = input.iter().any(|item| {
             item.id()
@@ -152,41 +161,13 @@ impl SkillReadTelemetry {
                 })
         });
 
-        let input_tokens_by_id = match attribution.resolve() {
-            Ok(attribution) => {
-                let mut input_tokens_by_id =
-                    HashMap::with_capacity(attribution.receipt.input_items.len());
-                for input_item in attribution.receipt.input_items {
-                    if input_item.item_id.is_empty() {
-                        state.outcome = if has_surviving_candidate {
-                            SkillReadTelemetryOutcome::Unavailable
-                        } else {
-                            SkillReadTelemetryOutcome::CompleteZero
-                        };
-                        return Err(ProviderRequestAttributionError::MissingReceiptInputItemId {
-                            item_id: input_item.item_id,
-                        });
-                    }
-                    if input_tokens_by_id
-                        .insert(input_item.item_id.clone(), input_item.input_tokens)
-                        .is_some()
-                    {
-                        state.outcome = if has_surviving_candidate {
-                            SkillReadTelemetryOutcome::Unavailable
-                        } else {
-                            SkillReadTelemetryOutcome::CompleteZero
-                        };
-                        return Err(
-                            ProviderRequestAttributionError::DuplicateReceiptInputItemId {
-                                item_id: input_item.item_id,
-                            },
-                        );
-                    }
-                }
-                input_tokens_by_id
-            }
+        let attribution = match attribution.resolve() {
+            Ok(attribution) => attribution,
             Err(error) => {
-                state.outcome = if has_surviving_candidate {
+                state.metrics = SkillReadMetrics::default();
+                state.counted.clear();
+                state.accepted_receipt_key = None;
+                state.outcome = if has_registered_candidate {
                     SkillReadTelemetryOutcome::Unavailable
                 } else {
                     SkillReadTelemetryOutcome::CompleteZero
@@ -196,13 +177,47 @@ impl SkillReadTelemetry {
         };
 
         if has_boundary_mismatch {
+            state.metrics = SkillReadMetrics::default();
+            state.counted.clear();
+            state.accepted_receipt_key = None;
             state.outcome = SkillReadTelemetryOutcome::Unavailable;
             return Ok(());
         }
         if !has_surviving_candidate {
-            state.outcome = SkillReadTelemetryOutcome::CompleteZero;
+            state.metrics = SkillReadMetrics::default();
+            state.counted.clear();
+            state.accepted_receipt_key = None;
+            state.outcome = if has_registered_candidate {
+                SkillReadTelemetryOutcome::Unavailable
+            } else {
+                SkillReadTelemetryOutcome::CompleteZero
+            };
             return Ok(());
         }
+
+        let receipt_key =
+            match validate_terminal_attribution(&input, session_id, turn_id, &attribution) {
+                Ok(receipt_key) => receipt_key,
+                Err(error) => {
+                    state.metrics = SkillReadMetrics::default();
+                    state.counted.clear();
+                    state.accepted_receipt_key = None;
+                    state.outcome = SkillReadTelemetryOutcome::Unavailable;
+                    return Err(error);
+                }
+            };
+        if state.accepted_receipt_key.as_ref() == Some(&receipt_key) {
+            state.outcome = SkillReadTelemetryOutcome::CompleteExact;
+            return Ok(());
+        }
+
+        let input_tokens_by_id: HashMap<_, _> = attribution
+            .receipt
+            .input_items
+            .iter()
+            .map(|item| (item.item_id.as_str(), item.input_tokens))
+            .collect();
+        state.accepted_receipt_key = Some(receipt_key);
 
         for item in &input {
             let Some(response_item_id) = item.id() else {
@@ -217,12 +232,6 @@ impl SkillReadTelemetry {
             {
                 continue;
             }
-            let Some(input_tokens) = input_tokens_by_id.get(response_item_id.as_str()) else {
-                state.outcome = SkillReadTelemetryOutcome::Unavailable;
-                return Err(ProviderRequestAttributionError::MissingReceiptInputItemId {
-                    item_id: response_item_id.to_string(),
-                });
-            };
             let key = SkillReadKey {
                 session_id: candidate.session_id.clone(),
                 turn_id: candidate.turn_id.clone(),
@@ -233,7 +242,27 @@ impl SkillReadTelemetry {
                 continue;
             }
             state.metrics.skill_read_calls += 1;
-            state.metrics.skill_read_input_tokens += input_tokens;
+            let Some(input_tokens) = input_tokens_by_id.get(response_item_id.as_str()) else {
+                state.metrics = SkillReadMetrics::default();
+                state.counted.clear();
+                state.accepted_receipt_key = None;
+                state.outcome = SkillReadTelemetryOutcome::Unavailable;
+                return Err(ProviderRequestAttributionError::MissingReceiptInputItemId {
+                    item_id: response_item_id.to_string(),
+                });
+            };
+            let Some(input_tokens) = state
+                .metrics
+                .skill_read_input_tokens
+                .checked_add(*input_tokens)
+            else {
+                state.metrics = SkillReadMetrics::default();
+                state.counted.clear();
+                state.accepted_receipt_key = None;
+                state.outcome = SkillReadTelemetryOutcome::Unavailable;
+                return Err(ProviderRequestAttributionError::InputTokenSumOverflow);
+            };
+            state.metrics.skill_read_input_tokens = input_tokens;
         }
         state.outcome = SkillReadTelemetryOutcome::CompleteExact;
         Ok(())
@@ -244,6 +273,7 @@ impl SkillReadTelemetry {
         let mut state = self.state();
         state.metrics = SkillReadMetrics::default();
         state.counted.clear();
+        state.accepted_receipt_key = None;
         state.successful_request_recorded = true;
         state.outcome = if state.candidates.is_empty() {
             SkillReadTelemetryOutcome::CompleteZero
@@ -282,16 +312,150 @@ impl SkillReadTelemetry {
     }
 }
 
+fn validate_terminal_attribution(
+    input: &[ResponseItem],
+    session_id: &str,
+    turn_id: &str,
+    attribution: &ProviderTerminalAttribution,
+) -> Result<SkillReadReceiptKey, ProviderRequestAttributionError> {
+    let receipt = &attribution.receipt;
+    let terminal = &attribution.terminal;
+    if !terminal.successful {
+        return Err(ProviderRequestAttributionError::TerminalResponseNotSuccessful);
+    }
+    if attribution.final_request_fingerprint.is_empty() || receipt.request_fingerprint.is_empty() {
+        return Err(ProviderRequestAttributionError::MissingRequestFingerprint);
+    }
+    if receipt.request_fingerprint != attribution.final_request_fingerprint {
+        return Err(ProviderRequestAttributionError::RequestFingerprintMismatch);
+    }
+    let terminal_session_id = terminal
+        .session_id
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .ok_or(ProviderRequestAttributionError::MissingSessionId)?;
+    let terminal_turn_id = terminal
+        .turn_id
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .ok_or(ProviderRequestAttributionError::MissingTurnId)?;
+    if terminal_session_id != session_id || receipt.session_id != session_id {
+        return Err(ProviderRequestAttributionError::SessionIdMismatch);
+    }
+    if terminal_turn_id != turn_id || receipt.turn_id != turn_id {
+        return Err(ProviderRequestAttributionError::TurnIdMismatch);
+    }
+    if terminal.response_id.is_empty() {
+        return Err(ProviderRequestAttributionError::MissingResponseId);
+    }
+    if receipt.response_id.is_empty() {
+        return Err(ProviderRequestAttributionError::MissingResponseId);
+    }
+    if receipt.response_id != terminal.response_id {
+        return Err(ProviderRequestAttributionError::ResponseIdMismatch);
+    }
+    if receipt.requested_model.is_empty() {
+        return Err(ProviderRequestAttributionError::MissingRequestedModel);
+    }
+    if receipt.requested_model != terminal.requested_model {
+        return Err(ProviderRequestAttributionError::RequestedModelMismatch);
+    }
+    if receipt.requested_model_fingerprint.is_empty() {
+        return Err(ProviderRequestAttributionError::MissingRequestedModelFingerprint);
+    }
+    if receipt.requested_model_fingerprint != provider_model_fingerprint(&receipt.requested_model) {
+        return Err(ProviderRequestAttributionError::RequestedModelFingerprintMismatch);
+    }
+    if receipt.resolved_model.is_empty() {
+        return Err(ProviderRequestAttributionError::MissingResolvedModel);
+    }
+    if terminal
+        .resolved_model
+        .as_deref()
+        .is_some_and(|resolved_model| resolved_model != receipt.resolved_model)
+    {
+        return Err(ProviderRequestAttributionError::ResolvedModelMismatch);
+    }
+    if receipt.resolved_model_fingerprint.is_empty() {
+        return Err(ProviderRequestAttributionError::MissingResolvedModelFingerprint);
+    }
+    if receipt.resolved_model_fingerprint != provider_model_fingerprint(&receipt.resolved_model) {
+        return Err(ProviderRequestAttributionError::ResolvedModelFingerprintMismatch);
+    }
+    if receipt.provider_transformation_version.is_empty() {
+        return Err(ProviderRequestAttributionError::MissingProviderTransformationVersion);
+    }
+    if receipt.tokenizer_accounting_version.is_empty() {
+        return Err(ProviderRequestAttributionError::MissingTokenizerAccountingVersion);
+    }
+    let authoritative_input_tokens = terminal
+        .authoritative_input_tokens
+        .ok_or(ProviderRequestAttributionError::MissingAggregateInputTokens)?;
+    if receipt.authoritative_input_tokens != authoritative_input_tokens {
+        return Err(
+            ProviderRequestAttributionError::AggregateInputTokensMismatch {
+                expected: authoritative_input_tokens,
+                actual: receipt.authoritative_input_tokens,
+            },
+        );
+    }
+
+    let mut final_item_ids = HashSet::new();
+    for (index, item) in input.iter().enumerate() {
+        let Some(item_id) = item.id() else {
+            return Err(ProviderRequestAttributionError::MissingFinalInputItemId { index });
+        };
+        let item_id = item_id.to_string();
+        if !final_item_ids.insert(item_id.clone()) {
+            return Err(ProviderRequestAttributionError::DuplicateFinalInputItemId { item_id });
+        }
+    }
+    let mut receipt_item_ids = HashSet::new();
+    let mut input_tokens = 0_u64;
+    for item in &receipt.input_items {
+        if item.item_id.is_empty() {
+            return Err(ProviderRequestAttributionError::MissingReceiptInputItemId {
+                item_id: item.item_id.clone(),
+            });
+        }
+        if !receipt_item_ids.insert(item.item_id.clone()) {
+            return Err(
+                ProviderRequestAttributionError::DuplicateReceiptInputItemId {
+                    item_id: item.item_id.clone(),
+                },
+            );
+        }
+        if !final_item_ids.contains(&item.item_id) {
+            return Err(ProviderRequestAttributionError::ExtraReceiptInputItemId {
+                item_id: item.item_id.clone(),
+            });
+        }
+        input_tokens = input_tokens
+            .checked_add(item.input_tokens)
+            .ok_or(ProviderRequestAttributionError::InputTokenSumOverflow)?;
+    }
+    if let Some(item_id) = final_item_ids.difference(&receipt_item_ids).next().cloned() {
+        return Err(ProviderRequestAttributionError::MissingReceiptInputItemId { item_id });
+    }
+    if input_tokens != authoritative_input_tokens {
+        return Err(
+            ProviderRequestAttributionError::AggregateInputTokensMismatch {
+                expected: authoritative_input_tokens,
+                actual: input_tokens,
+            },
+        );
+    }
+    Ok(SkillReadReceiptKey {
+        session_id: session_id.to_string(),
+        turn_id: turn_id.to_string(),
+        response_id: receipt.response_id.clone(),
+        request_fingerprint: receipt.request_fingerprint.clone(),
+    })
+}
+
 pub(crate) fn content_digest(contents: &str) -> String {
     let mut hasher = Sha1::new();
     hasher.update(contents.as_bytes());
-    format!("sha1:{:x}", hasher.finalize())
-}
-
-fn response_item_digest(response_item: &ResponseItem) -> String {
-    let serialized = serde_json::to_vec(response_item).unwrap_or_default();
-    let mut hasher = Sha1::new();
-    hasher.update(serialized);
     format!("sha1:{:x}", hasher.finalize())
 }
 

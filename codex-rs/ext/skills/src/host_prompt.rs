@@ -37,6 +37,8 @@ impl InjectedHostSkillPrompts {
 pub struct HostSkillPrompts {
     pub fragments: Vec<Box<dyn ContextualUserFragment + Send>>,
     pub injected: Vec<SkillMetadata>,
+    /// Exact model-visible contents paired with the injected metadata.
+    pub injected_contents: Vec<String>,
     pub warnings: Vec<String>,
 }
 
@@ -57,6 +59,7 @@ impl HostSkillsSnapshot {
         let mut prompts = HostSkillPrompts {
             fragments: Vec::with_capacity(selected_skills.len()),
             injected: Vec::with_capacity(selected_skills.len()),
+            injected_contents: Vec::with_capacity(selected_skills.len()),
             warnings: Vec::new(),
         };
 
@@ -74,6 +77,7 @@ impl HostSkillsSnapshot {
                             skill.name
                         ));
                     }
+                    prompts.injected_contents.push(contents.clone());
                     prompts.fragments.push(Box::new(SkillInstructions {
                         name: skill.name.clone(),
                         path: skill.path_to_skills_md.to_string_lossy().into_owned(),

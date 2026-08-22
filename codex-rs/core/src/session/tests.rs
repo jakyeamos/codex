@@ -9954,6 +9954,7 @@ impl SessionTask for UnavailableSkillTelemetryTask {
             &session_id,
             &ctx.sub_id,
             "/skills/unavailable/SKILL.md",
+            "unavailable skill body",
             item.clone(),
         ));
         let _ = telemetry.record_successful_provider_request(
