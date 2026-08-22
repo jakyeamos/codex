@@ -2570,6 +2570,21 @@ async fn try_run_sampling_request(
                 token_usage,
                 end_turn,
             } => {
+                let skill_read_telemetry = turn_context
+                    .extension_data
+                    .get::<SkillReadTelemetry>()
+                    .expect("every turn has skill read telemetry");
+                if let Some(provider_request) = client_session.take_skill_read_provider_request() {
+                    if let Err(error) = skill_read_telemetry.record_successful_provider_request(
+                        &sess.thread_id.to_string(),
+                        &turn_context.sub_id,
+                        provider_request,
+                    ) {
+                        tracing::debug!(?error, "provider skill-read attribution unavailable");
+                    }
+                } else {
+                    skill_read_telemetry.record_missing_successful_provider_request();
+                }
                 sess.services
                     .analytics_events_client
                     .track_code_mode_tool_call(
