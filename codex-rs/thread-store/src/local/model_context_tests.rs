@@ -82,6 +82,58 @@ async fn loads_latest_checkpoint_with_required_turn_metadata() {
 }
 
 #[tokio::test]
+async fn legacy_model_context_skips_large_history_before_latest_checkpoint() {
+    let home = TempDir::new().expect("temp dir");
+    let uuid = Uuid::from_u128(/*v*/ 1010);
+    let thread_id = ThreadId::from_string(&uuid.to_string()).expect("thread id");
+    let path = write_session_file_with_history_mode(
+        home.path(),
+        "2025-01-03T13-00-10",
+        uuid,
+        ThreadHistoryMode::Legacy,
+    )
+    .expect("write legacy session");
+
+    let large_obsolete_message = "x".repeat(2 * 1024 * 1024);
+    append_items(
+        path.as_path(),
+        [
+            turn_context(home.path(), "turn-1"),
+            user_message(&large_obsolete_message),
+            legacy_compacted("older checkpoint", Some(Vec::new())),
+            user_message("obsolete suffix"),
+            turn_context(home.path(), "turn-2"),
+            legacy_compacted("latest checkpoint", Some(Vec::new())),
+            user_message("latest suffix"),
+        ],
+    );
+    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+
+    let context = store
+        .load_latest_model_context(LoadThreadHistoryParams {
+            thread_id,
+            include_archived: false,
+        })
+        .await
+        .expect("load legacy model context");
+
+    assert_eq!(context.items.len(), 4);
+    assert!(matches!(
+        context.items.first(),
+        Some(RolloutItem::SessionMeta(meta)) if meta.meta.id == thread_id
+    ));
+    assert!(context.items.iter().any(|item| {
+        matches!(item, RolloutItem::Compacted(compacted) if compacted.message == "latest checkpoint")
+    }));
+    assert!(context.items.iter().any(|item| {
+        matches!(item, RolloutItem::ResponseItem(response) if response.item == user_message_response("latest suffix"))
+    }));
+    assert!(!context.items.iter().any(|item| {
+        matches!(item, RolloutItem::Compacted(compacted) if compacted.message == "older checkpoint")
+    }));
+}
+
+#[tokio::test]
 async fn fork_context_excludes_items_after_frozen_cutoff() {
     let home = TempDir::new().expect("temp dir");
     let uuid = Uuid::from_u128(/*v*/ 1007);
@@ -541,18 +593,19 @@ fn turn_complete(turn_id: &str) -> RolloutItem {
 }
 
 fn user_message(message: &str) -> RolloutItem {
-    RolloutItem::ResponseItem(
-        ResponseItem::Message {
-            id: None,
-            role: "user".to_string(),
-            content: vec![ContentItem::InputText {
-                text: message.to_string(),
-            }],
-            phase: None,
-            internal_chat_message_metadata_passthrough: None,
-        }
-        .into(),
-    )
+    RolloutItem::ResponseItem(user_message_response(message).into())
+}
+
+fn user_message_response(message: &str) -> ResponseItem {
+    ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: message.to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    }
 }
 
 fn contextual_user_message() -> RolloutItem {
@@ -629,4 +682,12 @@ fn compacted(message: &str, replacement_history: Option<Vec<ResponseItem>>) -> R
         previous_window_id: None,
         window_id: None,
     })
+}
+
+fn legacy_compacted(message: &str, replacement_history: Option<Vec<ResponseItem>>) -> RolloutItem {
+    let RolloutItem::Compacted(mut compacted) = compacted(message, replacement_history) else {
+        unreachable!("compacted helper always returns a compacted item");
+    };
+    compacted.window_number = None;
+    RolloutItem::Compacted(compacted)
 }

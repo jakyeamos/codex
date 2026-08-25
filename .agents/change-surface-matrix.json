@@ -2,7 +2,12 @@
   "schema_version": "change-surface-matrix/v1",
   "subject": {"kind": "repository", "id": "codex"},
   "owner": "repository-owner",
-  "last_reviewed": "2026-08-11",
+  "last_reviewed": "2026-08-25",
+  "last_change_review": {
+    "change": "Bound plain legacy rollout resume history at the latest safe compaction checkpoint",
+    "codex_core": "applicable; validate rollout and thread-store history reconstruction",
+    "agent_consumers": "no impact; CLI, app-server protocol, SDK, skill, and installer contracts are unchanged"
+  },
   "surfaces": [
     {
       "id": "codex-core",

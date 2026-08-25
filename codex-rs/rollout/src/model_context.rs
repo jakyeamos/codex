@@ -48,13 +48,33 @@ pub enum ModelContextScanProgress {
 #[derive(Debug, Default)]
 pub struct ModelContextScan {
     items_newest_first: Vec<RolloutItem>,
+    history_mode: ModelContextHistoryMode,
     saw_compaction: bool,
     saw_completed_turn_context: bool,
     must_scan_to_start: bool,
     active_segment: ActiveTurnSegment,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ModelContextHistoryMode {
+    #[default]
+    Paginated,
+    Legacy,
+}
+
 impl ModelContextScan {
+    /// Creates a reverse scan for a legacy rollout.
+    ///
+    /// Legacy rollouts do not always persist paginated turn boundaries or compaction window
+    /// numbers. A replacement-history checkpoint is still a complete model-context base, so the
+    /// scan may stop after it has also retained the newest turn context needed for resume.
+    pub fn for_legacy_history() -> Self {
+        Self {
+            history_mode: ModelContextHistoryMode::Legacy,
+            ..Self::default()
+        }
+    }
+
     /// Adds the next newest-to-oldest rollout item and reports whether the reader can stop.
     pub fn push(&mut self, item: RolloutItem) -> ModelContextScanProgress {
         let progress = self.observe(&item);
@@ -84,8 +104,12 @@ impl ModelContextScan {
         }
 
         match item {
+            RolloutItem::Compacted(compacted) if compacted.replacement_history.is_none() => {
+                self.must_scan_to_start = true;
+            }
             RolloutItem::Compacted(compacted)
-                if compacted.replacement_history.is_none() || compacted.window_number.is_none() =>
+                if self.history_mode == ModelContextHistoryMode::Paginated
+                    && compacted.window_number.is_none() =>
             {
                 self.must_scan_to_start = true;
             }
@@ -130,6 +154,9 @@ impl ModelContextScan {
                 }
             }
             RolloutItem::TurnContext(context) => {
+                if self.history_mode == ModelContextHistoryMode::Legacy {
+                    self.saw_completed_turn_context = true;
+                }
                 if self.active_segment.turn_id.is_none() {
                     self.active_segment.turn_id = context.turn_id.clone();
                 }
@@ -156,8 +183,7 @@ impl ModelContextScan {
             | RolloutItem::WorldState(_)
             | RolloutItem::RealtimeItem(_)
             | RolloutItem::SecurityRiskScore(_)
-            | RolloutItem::HostObservation(_)
-            | RolloutItem::WorldState(_) => {}
+            | RolloutItem::HostObservation(_) => {}
         }
 
         if self.has_bounded_cutoff() {

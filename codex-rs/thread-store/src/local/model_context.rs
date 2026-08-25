@@ -32,7 +32,9 @@ mod tests;
 /// bounded cutoff is available, the scan continues to the beginning and returns the complete
 /// replay it already accumulated.
 ///
-/// Legacy and compressed rollout shapes keep the existing full-history path.
+/// Plain legacy rollouts use the same bounded reverse reader with legacy cutoff rules. Compressed
+/// rollouts keep the streaming full-history path because random-access reverse scanning is not
+/// available without first materializing the compressed file.
 pub(super) async fn load_latest_model_context(
     store: &LocalThreadStore,
     params: LoadThreadHistoryParams,
@@ -65,21 +67,44 @@ pub(super) async fn load_latest_model_context(
         });
     }
 
-    let items = if matches!(session_meta.meta.history_mode, ThreadHistoryMode::Paginated)
-        && !path
-            .file_name()
-            .and_then(|file_name| file_name.to_str())
-            .is_some_and(|file_name| file_name.ends_with(".jsonl.zst"))
-    {
+    let is_compressed = path
+        .file_name()
+        .and_then(|file_name| file_name.to_str())
+        .is_some_and(|file_name| file_name.ends_with(".jsonl.zst"));
+    let items = if is_compressed {
+        read_thread::load_history_items(path.as_path()).await?
+    } else if matches!(session_meta.meta.history_mode, ThreadHistoryMode::Paginated) {
         let lineage = store.resolve_rollout_lineage(params.thread_id).await?;
         scan_model_context_from_lineage(lineage, session_meta).await?
     } else {
-        read_thread::load_history_items(path.as_path()).await?
+        scan_legacy_model_context(path, session_meta).await?
     };
 
     Ok(StoredModelContext {
         thread_id: params.thread_id,
         items,
+    })
+}
+
+async fn scan_legacy_model_context(
+    path: std::path::PathBuf,
+    session_meta: SessionMetaLine,
+) -> ThreadStoreResult<Vec<RolloutItem>> {
+    let scan = tokio::task::spawn_blocking(move || {
+        let file = File::open(path.as_path())?;
+        let scanner = ReverseJsonlScanner::new(file)?;
+        scan_model_context_blocking(
+            scanner,
+            ModelContextScan::for_legacy_history(),
+            session_meta,
+        )
+    })
+    .await
+    .map_err(|err| ThreadStoreError::Internal {
+        message: format!("failed to join legacy model context scan: {err}"),
+    })?;
+    scan.map_err(|err| ThreadStoreError::Internal {
+        message: format!("failed to scan legacy model context: {err}"),
     })
 }
 
@@ -155,6 +180,31 @@ fn scan_model_context_from_lineage_blocking(
                 ModelContextScanProgress::Continue => {}
                 ModelContextScanProgress::Complete => break 'segments,
             }
+        }
+    }
+
+    let canonical_meta = session_meta.clone();
+    let mut items = scan.finish(session_meta);
+    if !matches!(items.first(), Some(RolloutItem::SessionMeta(_))) {
+        items.insert(0, RolloutItem::SessionMeta(canonical_meta));
+    }
+    Ok(items)
+}
+
+fn scan_model_context_blocking(
+    mut scanner: ReverseJsonlScanner<File>,
+    mut scan: ModelContextScan,
+    session_meta: SessionMetaLine,
+) -> io::Result<Vec<RolloutItem>> {
+    while let Some(outcome) = scanner.scan_next::<RolloutLine>()? {
+        let ScanOutcome::Parsed(line) = outcome else {
+            continue;
+        };
+        if matches!(&line.item, RolloutItem::SessionMeta(_)) {
+            break;
+        }
+        if scan.push(line.item) == ModelContextScanProgress::Complete {
+            break;
         }
     }
 
