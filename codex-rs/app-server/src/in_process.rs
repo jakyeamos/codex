@@ -70,15 +70,18 @@ use crate::transport::CHANNEL_CAPACITY;
 use crate::transport::OutboundConnectionState;
 use crate::transport::route_outgoing_envelope;
 use codex_analytics::AppServerRpcTransport;
+use codex_app_server_protocol::AgentMessageDelivery;
 use codex_app_server_protocol::ClientNotification;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ConfigWarningNotification;
 use codex_app_server_protocol::InitializeParams;
+use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::Result;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
+use codex_app_server_protocol::ThreadItem;
 use codex_arg0::Arg0DispatchPaths;
 use codex_config::CloudConfigBundleLoader;
 use codex_config::LoaderOverrides;
@@ -111,8 +114,16 @@ fn server_notification_requires_delivery(notification: &ServerNotification) -> b
     matches!(
         notification,
         ServerNotification::TurnCompleted(_)
+            | ServerNotification::ThreadQueueChanged(_)
             | ServerNotification::ThreadSettingsUpdated(_)
             | ServerNotification::ExternalAgentConfigImportCompleted(_)
+            | ServerNotification::ItemCompleted(ItemCompletedNotification {
+                item: ThreadItem::AgentMessage {
+                    delivery: Some(AgentMessageDelivery::Async),
+                    ..
+                },
+                ..
+            })
     )
 }
 
@@ -426,14 +437,15 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
     let thread_setup_status_registry = ThreadSetupStatusRegistry::new();
     let thread_setup_status_handle =
         thread_setup_status_registry.handle_for(IN_PROCESS_CONNECTION_ID);
+    let auth_manager =
+        AuthManager::shared_from_config(args.config.as_ref(), args.enable_codex_api_key_env)
+            .await
+            .map_err(IoError::other)?;
     let (client_tx, mut client_rx) = mpsc::channel::<InProcessClientMessage>(channel_capacity);
     let (event_tx, event_rx) = mpsc::channel::<InProcessServerEvent>(channel_capacity);
 
     let runtime_handle = tokio::spawn(async move {
         let (outgoing_tx, outgoing_rx) = mpsc::channel::<OutgoingEnvelope>(channel_capacity);
-        let auth_manager =
-            AuthManager::shared_from_config(args.config.as_ref(), args.enable_codex_api_key_env)
-                .await;
         let analytics_events_client =
             analytics_events_client_from_config(Arc::clone(&auth_manager), args.config.as_ref());
         let analytics_events_flush_client = analytics_events_client.clone();
@@ -466,7 +478,7 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
         ));
 
         let processor_outgoing = Arc::clone(&outgoing_message_sender);
-        let mut config_manager = ConfigManager::new(
+        let config_manager = ConfigManager::new(
             args.config.codex_home.to_path_buf(),
             args.cli_overrides,
             args.loader_overrides,
@@ -475,7 +487,6 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
             args.arg0_paths.clone(),
             args.thread_config_loader,
         );
-        config_manager.psp = args.config.psp;
         let (processor_tx, mut processor_rx) = mpsc::channel::<ProcessorCommand>(channel_capacity);
         let mut processor_handle = tokio::spawn(async move {
             let processor = Arc::new(MessageProcessor::new(MessageProcessorArgs {
@@ -737,6 +748,7 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
                                 match send_error {
                                     mpsc::error::TrySendError::Full(_) => {
                                         warn!("dropping in-process server notification (queue full)");
+                                        continue;
                                     }
                                     mpsc::error::TrySendError::Closed(_) => {
                                         break;
@@ -804,6 +816,7 @@ mod tests {
     use codex_app_server_protocol::SessionSource as ApiSessionSource;
     use codex_app_server_protocol::ThreadSetupStatus;
     use codex_app_server_protocol::ThreadSetupStatusReadParams;
+    use codex_app_server_protocol::ThreadQueueChangedNotification;
     use codex_app_server_protocol::ThreadStartParams;
     use codex_app_server_protocol::ThreadStartResponse;
     use codex_app_server_protocol::Turn;
@@ -1078,12 +1091,31 @@ mod tests {
             })
         ));
         assert!(server_notification_requires_delivery(
+            &ServerNotification::ThreadQueueChanged(ThreadQueueChangedNotification {
+                thread_id: "thread-1".to_string(),
+            })
+        ));
+        assert!(server_notification_requires_delivery(
             &ServerNotification::ExternalAgentConfigImportCompleted(
                 ExternalAgentConfigImportCompletedNotification {
                     import_id: "import".to_string(),
                     item_type_results: Vec::new(),
                 },
             )
+        ));
+        assert!(server_notification_requires_delivery(
+            &ServerNotification::ItemCompleted(ItemCompletedNotification {
+                item: ThreadItem::AgentMessage {
+                    id: "item-1".to_string(),
+                    text: "Still working".to_string(),
+                    phase: None,
+                    memory_citation: None,
+                    delivery: Some(AgentMessageDelivery::Async),
+                },
+                thread_id: "thread-1".to_string(),
+                turn_id: "turn-1".to_string(),
+                completed_at_ms: 0,
+            })
         ));
     }
 }

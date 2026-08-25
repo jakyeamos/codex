@@ -23,7 +23,8 @@
   "hook": {
     "rules": {
       "pre-cr-failed": "off",
-      "oversized-source": "off"
+      "oversized-source": "off",
+      "package-manager": "warn"
     }
   }
 }

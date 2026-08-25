@@ -6,7 +6,7 @@
 //! the model.
 
 use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::RolloutItem;
+use codex_rollout::RolloutItem;
 
 use super::rollback;
 
@@ -68,7 +68,7 @@ impl ModelReplayPlanner {
             RolloutItem::TurnContext(context) => ReplayRecord::TurnContext(context.turn_id.clone()),
             RolloutItem::EventMsg(EventMsg::UserMessage(_))
             | RolloutItem::InterAgentCommunication(_) => ReplayRecord::UserBoundary,
-            RolloutItem::ResponseItem(response) if rollback::counts_as_boundary(response) => {
+            RolloutItem::ResponseItem(response) if rollback::counts_as_boundary(&response.item) => {
                 ReplayRecord::UserBoundary
             }
             RolloutItem::SessionMeta(_)
@@ -76,6 +76,8 @@ impl ModelReplayPlanner {
             | RolloutItem::EventMsg(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::WorldState(_)
+            | RolloutItem::RealtimeItem(_)
+            | RolloutItem::SecurityRiskScore(_)
             | RolloutItem::HostObservation(_) => return,
         };
         self.records.push(record);

@@ -9,11 +9,14 @@ use codex_protocol::protocol::HookOutputEntryKind;
 use codex_protocol::protocol::HookRunStatus;
 use codex_protocol::protocol::HookRunSummary;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use serde_json::Map;
+use serde_json::Value;
 
 use super::common;
+use crate::engine::ClaudeHooksEngine;
 use crate::engine::ConfiguredHandler;
-use crate::engine::command_runner::CommandHookRuntime;
-use crate::engine::command_runner::CommandRunResult;
+use crate::engine::HandlerRunResult;
+use crate::engine::HandlerSourcePath;
 use crate::engine::dispatcher;
 use crate::engine::output_parser;
 use crate::schema::NullableString;
@@ -28,6 +31,7 @@ pub struct StopRequest {
     pub transcript_path: Option<PathBuf>,
     pub model: String,
     pub permission_mode: String,
+    pub request_metadata: Option<Map<String, Value>>,
     pub stop_hook_active: bool,
     pub last_assistant_message: Option<String>,
     pub target: StopHookTarget,
@@ -88,17 +92,14 @@ pub(crate) fn preview(
         request.target.matcher_input(),
     )
     .into_iter()
+    .filter(|handler| matches!(handler.source_path, HandlerSourcePath::Local(_)))
     .map(|handler| dispatcher::running_summary(&handler))
     .collect()
 }
 
-pub(crate) async fn run(
-    handlers: &[ConfiguredHandler],
-    runtime: &CommandHookRuntime,
-    request: StopRequest,
-) -> StopOutcome {
+pub(crate) async fn run(engine: &ClaudeHooksEngine, request: StopRequest) -> StopOutcome {
     let matched = dispatcher::select_handlers(
-        handlers,
+        &engine.handlers,
         request.target.event_name(),
         request.target.matcher_input(),
     );
@@ -177,12 +178,13 @@ pub(crate) async fn run(
         }
     };
 
-    let results = dispatcher::execute_handlers(
-        runtime,
+    let results = dispatcher::execute_handlers_with_metadata(
+        engine,
         matched,
         input_json,
         request.cwd.as_path(),
         Some(request.turn_id),
+        request.request_metadata.as_ref(),
         parse_completed,
     )
     .await;
@@ -201,7 +203,7 @@ pub(crate) async fn run(
 
 fn parse_completed(
     handler: &ConfiguredHandler,
-    run_result: CommandRunResult,
+    run_result: HandlerRunResult,
     turn_id: Option<String>,
 ) -> dispatcher::ParsedHandler<StopHandlerData> {
     let mut entries = Vec::new();
@@ -412,7 +414,6 @@ fn serialization_failure_outcome(hook_events: Vec<HookCompletedEvent>) -> StopOu
 #[cfg(test)]
 mod tests {
     use codex_protocol::protocol::HookEventName;
-    use codex_protocol::protocol::HookExecutionMode;
     use codex_protocol::protocol::HookOutputEntry;
     use codex_protocol::protocol::HookOutputEntryKind;
     use codex_protocol::protocol::HookRunStatus;
@@ -426,7 +427,7 @@ mod tests {
     use super::aggregate_results;
     use super::parse_completed;
     use crate::engine::ConfiguredHandler;
-    use crate::engine::command_runner::CommandRunResult;
+    use crate::engine::HandlerRunResult;
 
     #[test]
     fn block_decision_with_reason_sets_continuation_prompt() {
@@ -474,8 +475,7 @@ mod tests {
             }]
         );
 
-        let mut async_handler = handler();
-        async_handler.execution_mode = HookExecutionMode::Async;
+        let async_handler = handler_with_async(/*async*/ true);
         let parsed = parse_completed(
             &async_handler,
             run_result(Some(0), r#"{"decision":"block"}"#, ""),
@@ -592,8 +592,7 @@ mod tests {
             }]
         );
 
-        let mut async_handler = handler();
-        async_handler.execution_mode = HookExecutionMode::Async;
+        let async_handler = handler_with_async(/*async*/ true);
         let parsed = parse_completed(
             &async_handler,
             run_result(Some(0), "not json", ""),
@@ -642,23 +641,29 @@ mod tests {
     }
 
     fn handler() -> ConfiguredHandler {
+        handler_with_async(/*async*/ false)
+    }
+
+    fn handler_with_async(r#async: bool) -> ConfiguredHandler {
         ConfiguredHandler {
             event_name: HookEventName::Stop,
-            execution_mode: codex_protocol::protocol::HookExecutionMode::Sync,
             matcher: None,
-            command: "echo hook".to_string(),
             timeout_sec: 600,
             status_message: None,
             additional_context_limit: Default::default(),
-            source_path: test_path_buf("/tmp/hooks.json").abs(),
+            source_path: test_path_buf("/tmp/hooks.json").abs().into(),
             source: codex_protocol::protocol::HookSource::User,
             display_order: 0,
-            env: std::collections::HashMap::new(),
+            kind: crate::engine::ConfiguredHandlerKind::Command {
+                command: "echo hook".to_string(),
+                r#async,
+                env: std::collections::HashMap::new(),
+            },
         }
     }
 
-    fn run_result(exit_code: Option<i32>, stdout: &str, stderr: &str) -> CommandRunResult {
-        CommandRunResult {
+    fn run_result(exit_code: Option<i32>, stdout: &str, stderr: &str) -> HandlerRunResult {
+        HandlerRunResult {
             started_at: 1,
             completed_at: 2,
             duration_ms: 1,
