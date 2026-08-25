@@ -9,6 +9,7 @@ use std::borrow::Cow;
 use super::STATE_MIGRATOR;
 use super::THREAD_HISTORY_MIGRATOR;
 use super::repair_legacy_recency_migration_version;
+use super::repair_legacy_skill_invocations_migration_version;
 use crate::PINNED_THREAD_SECTION_ID;
 use crate::PINNED_THREAD_SECTION_NAME;
 
@@ -819,6 +820,78 @@ async fn repairs_recency_migration_that_was_applied_as_version_38() {
         .map(|migration| (migration.version, migration.checksum.to_vec()))
         .collect::<Vec<_>>();
     assert_eq!(applied, expected);
+
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn repairs_skill_invocations_migration_that_was_applied_as_version_48() {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home)
+        .await
+        .expect("sqlite home should be created");
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let state_path = sqlite.state_db_path();
+    let pool = sqlite
+        .open_read_write_pool(&state_path)
+        .await
+        .expect("sqlite database should open");
+    migrator_through(/*version*/ 47)
+        .run(&pool)
+        .await
+        .expect("pre-collision migrations should apply");
+
+    let skill_invocations_migration = STATE_MIGRATOR
+        .migrations
+        .iter()
+        .find(|migration| migration.version == 1_000_048)
+        .expect("skill invocation migration should exist");
+    let mut legacy_migrations = STATE_MIGRATOR
+        .migrations
+        .iter()
+        .filter(|migration| migration.version <= 47)
+        .cloned()
+        .collect::<Vec<_>>();
+    legacy_migrations.push(Migration::new(
+        48,
+        skill_invocations_migration.description.clone(),
+        skill_invocations_migration.migration_type,
+        skill_invocations_migration.sql.clone(),
+        skill_invocations_migration.no_tx,
+    ));
+    let legacy_skill_invocations_migrator = Migrator::with_migrations(legacy_migrations);
+    legacy_skill_invocations_migrator
+        .run(&pool)
+        .await
+        .expect("legacy skill invocation migration should apply as version 48");
+
+    repair_legacy_skill_invocations_migration_version(&pool, &STATE_MIGRATOR)
+        .await
+        .expect("legacy skill invocation history should be repaired");
+    STATE_MIGRATOR
+        .run(&pool)
+        .await
+        .expect("current migrations should apply after repair");
+
+    let applied_skill_version = sqlx::query_scalar::<_, i64>(
+        "SELECT version FROM _sqlx_migrations WHERE description = 'skill invocations'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("skill invocation migration record should load");
+    assert_eq!(applied_skill_version, 1_000_048);
+    let appearance = sqlx::query_scalar::<_, String>(
+        "SELECT appearance FROM thread_sections WHERE id = 'missing'",
+    )
+    .fetch_optional(&pool)
+    .await;
+    assert!(
+        appearance.is_ok(),
+        "thread section appearance migration should apply"
+    );
 
     pool.close().await;
 }

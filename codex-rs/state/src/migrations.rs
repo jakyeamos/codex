@@ -116,6 +116,55 @@ WHERE version = ?
     Ok(())
 }
 
+const LEGACY_SKILL_INVOCATIONS_VERSION: i64 = 48;
+const SKILL_INVOCATIONS_VERSION: i64 = 1_000_048;
+
+/// The fork originally assigned migration 48 to `skill_invocations` before
+/// upstream assigned the same version to thread-section appearance. Move the
+/// fork's applied migration record into a reserved version range so both
+/// histories can coexist without changing either migration's checksum.
+pub(crate) async fn repair_legacy_skill_invocations_migration_version(
+    pool: &SqlitePool,
+    migrator: &Migrator,
+) -> anyhow::Result<()> {
+    let Some(skill_invocations_migration) = migrator
+        .migrations
+        .iter()
+        .find(|migration| migration.version == SKILL_INVOCATIONS_VERSION)
+    else {
+        return Ok(());
+    };
+    let migrations_table_exists = sqlx::query_scalar::<_, i64>(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
+    )
+    .fetch_optional(pool)
+    .await?
+    .is_some();
+    if !migrations_table_exists {
+        return Ok(());
+    }
+
+    sqlx::query(
+        r#"
+UPDATE _sqlx_migrations
+SET version = ?, description = ?
+WHERE version = ?
+  AND checksum = ?
+  AND NOT EXISTS (
+      SELECT 1 FROM _sqlx_migrations WHERE version = ?
+  )
+        "#,
+    )
+    .bind(skill_invocations_migration.version)
+    .bind(skill_invocations_migration.description.as_ref())
+    .bind(LEGACY_SKILL_INVOCATIONS_VERSION)
+    .bind(skill_invocations_migration.checksum.as_ref())
+    .bind(skill_invocations_migration.version)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 #[path = "migrations_tests.rs"]
 mod tests;
